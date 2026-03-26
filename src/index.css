@@ -1,0 +1,167 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", ui-sans-serif, system-ui, sans-serif;
+  
+  --color-canvas-bg: #f5f5f7;
+  --color-sidebar-bg: #eef0f4;
+  --color-node-bg: rgba(255, 255, 255, 0.78);
+  --color-accent: #0071e3;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html, body, #root {
+    min-height: 100%;
+  }
+
+  body {
+    @apply text-slate-900 antialiased;
+    background:
+      radial-gradient(circle at top left, rgba(255, 255, 255, 0.96), transparent 28%),
+      radial-gradient(circle at 78% 18%, rgba(0, 113, 227, 0.08), transparent 20%),
+      linear-gradient(180deg, #fbfbfd 0%, #f3f4f7 46%, #eceef3 100%);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-family: var(--font-sans);
+  }
+
+  .markdown-content {
+    @apply text-[15px] leading-7 text-slate-600;
+  }
+  
+  .markdown-content p {
+    @apply mb-4 last:mb-0;
+  }
+
+  .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+    @apply mt-6 mb-2 text-slate-900;
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+
+  .markdown-content h1 { @apply text-xl; }
+  .markdown-content h2 { @apply text-lg; }
+  .markdown-content h3 { @apply text-base; }
+
+  .markdown-content ul, .markdown-content ol {
+    @apply pl-5 mb-4 space-y-1;
+  }
+
+  .markdown-content ul { @apply list-disc; }
+  .markdown-content ol { @apply list-decimal; }
+
+  .markdown-content code {
+    @apply bg-slate-100/90 px-1.5 py-0.5 rounded text-slate-800 font-mono text-[0.9em];
+  }
+
+  .markdown-content pre {
+    @apply bg-slate-950 text-slate-100 p-5 rounded-[1.5rem] overflow-x-auto mb-4 font-mono text-xs;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  .markdown-content pre code {
+    @apply bg-transparent p-0 text-inherit;
+  }
+
+  .markdown-content blockquote {
+    @apply border-l-4 border-slate-200 pl-4 italic text-slate-500 mb-4;
+  }
+
+  .markdown-content a {
+    @apply text-emerald-600 underline hover:text-emerald-700;
+  }
+  ::selection {
+    background: rgba(0, 113, 227, 0.14);
+  }
+}
+
+/* React Flow Customizations */
+.react-flow__node-conversation {
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+}
+
+.react-flow__handle {
+  width: 10px !important;
+  height: 10px !important;
+  border: 2px solid rgba(255, 255, 255, 0.95) !important;
+  background-color: rgba(120, 126, 138, 0.8) !important;
+  transition: all 0.2s ease !important;
+  box-shadow: 0 6px 18px rgba(36, 39, 46, 0.12) !important;
+}
+
+.react-flow__handle:hover {
+  background-color: #0071e3 !important;
+  transform: scale(1.2) !important;
+}
+
+.react-flow__edge-path {
+  stroke: rgba(120, 126, 138, 0.34);
+  stroke-width: 2;
+  transition: stroke 0.3s ease, stroke-width 0.3s ease;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #0071e3 !important;
+}
+
+.react-flow__controls {
+  background-color: rgba(255, 255, 255, 0.7) !important;
+  backdrop-filter: blur(18px) !important;
+  box-shadow: 0 10px 30px rgba(36, 39, 46, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.9) !important;
+  border-radius: 1.25rem !important;
+  overflow: hidden !important;
+  margin: 1.5rem !important;
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid #f1f5f9 !important;
+  background-color: transparent !important;
+  width: 40px !important;
+  height: 40px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: rgba(255, 255, 255, 0.7) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: #94a3b8 !important; /* slate-400 */
+  width: 16px !important;
+  height: 16px !important;
+}
+
+.react-flow__background {
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(180deg, #fafafc 0%, #f0f2f6 100%) !important;
+  background-size: 28px 28px, 28px 28px, 100% 100% !important;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-200 rounded-full hover:bg-slate-300 transition-colors;
+}

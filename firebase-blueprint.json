@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and settings",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "lastLogin": { "type": "number" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Canvas": {
+      "title": "Canvas",
+      "description": "A conversation flow canvas",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "nodes": { "type": "array" },
+        "edges": { "type": "array" },
+        "createdAt": { "type": "number" },
+        "lastModified": { "type": "number" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["id", "name", "ownerId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/users/{userId}/canvases/{canvasId}": {
+      "schema": "Canvas",
+      "description": "User's conversation canvases"
+    }
+  }
+}

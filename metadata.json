@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Canvas",
+  "description": "An infinite canvas conversation interface inspired by Gemini and ComfyUI, built with React Flow and Gemini AI.",
+  "requestFramePermissions": []
+}
