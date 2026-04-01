@@ -48,6 +48,7 @@ interface ChatComposerProps {
   selectedProvider: ProviderCatalogEntry;
   selectedProviderId: ProviderCatalogId;
   supportsAnyUpload: boolean;
+  placeholderOverride?: string;
   value: string;
 }
 
@@ -91,6 +92,7 @@ export default function ChatComposer({
   selectedProvider,
   selectedProviderId,
   supportsAnyUpload,
+  placeholderOverride,
   value,
 }: ChatComposerProps) {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -143,13 +145,13 @@ export default function ChatComposer({
     fileInputRef.current?.click();
   };
 
-  const placeholder = !isProviderConfigured
+  const placeholder = placeholderOverride ?? (!isProviderConfigured
     ? '请先在 Settings 中配置可用模型...'
     : pendingBranch
       ? 'Ask the selected model to continue this branch...'
       : readyMode
         ? 'Ask anything'
-        : 'Start a new conversation flow...';
+        : 'Start a new conversation flow...');
 
   const canSubmit = (value.trim().length > 0 || attachments.length > 0) && !isCurrentCanvasProcessing && isProviderConfigured;
 

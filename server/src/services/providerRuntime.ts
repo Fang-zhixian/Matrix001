@@ -10,6 +10,7 @@ import {
   PROVIDER_CATALOG,
   type ProviderCatalogId,
 } from '../../../shared/modelCatalog.js';
+import { HttpError } from '../utils/httpError.js';
 
 type PlatformProviderEnv = {
   apiKey: string;
@@ -108,7 +109,7 @@ export function resolveProviderCredentials(
 ) {
   const runtime = getProviderRuntimeStatus(providerId, providerConfig);
   if (!runtime.available) {
-    throw new Error(`Provider ${providerId} is not configured.`);
+    throw new HttpError(400, `Provider ${providerId} is not configured.`);
   }
 
   const platformConfig = PLATFORM_PROVIDER_ENV[providerId];

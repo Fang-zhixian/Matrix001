@@ -12,10 +12,29 @@ import {
 import SidebarChatRow from './sidebar/SidebarChatRow';
 import SidebarGroupRow from './sidebar/SidebarGroupRow';
 import SidebarProfileMenu from './sidebar/SidebarProfileMenu';
+import type { AuthUser, BillingSummary, PlanSummary } from '../../shared/api';
 
 const SIDEBAR_WIDTH = 292;
 
-const Sidebar = ({ onOpenSettings }: { onOpenSettings: () => void }) => {
+const Sidebar = ({
+  currentUser,
+  billingSummary,
+  plans,
+  onOpenSettings,
+  onOpenAccount,
+  onOpenAuth,
+  onOpenBilling,
+  onLogout,
+}: {
+  currentUser: AuthUser | null;
+  billingSummary: BillingSummary | null;
+  plans: PlanSummary[];
+  onOpenSettings: () => void;
+  onOpenAccount: () => void;
+  onOpenAuth: (mode: 'login' | 'register') => void;
+  onOpenBilling: () => void;
+  onLogout: () => void;
+}) => {
   const {
     canvases,
     sidebarFolders,
@@ -96,6 +115,8 @@ const Sidebar = ({ onOpenSettings }: { onOpenSettings: () => void }) => {
 
   const visibleGroups = showAllGroups ? groups : groups.slice(0, 3);
   const hiddenGroupCount = Math.max(groups.length - 3, 0);
+  const activePlanLabel =
+    plans.find((plan) => plan.id === billingSummary?.planId)?.label ?? null;
 
   useEffect(() => {
     if (selectedGroupId && !groups.some((group) => group.id === selectedGroupId)) {
@@ -443,11 +464,35 @@ const Sidebar = ({ onOpenSettings }: { onOpenSettings: () => void }) => {
         <div className="border-t border-[#e6e6ea] px-3 py-3">
           <SidebarProfileMenu
             isOpen={isProfileMenuOpen}
-            user={null}
+            user={
+              currentUser
+                ? {
+                    displayName: currentUser.displayName,
+                    email: currentUser.email,
+                  }
+                : null
+            }
+            planLabel={activePlanLabel}
             onToggle={() => setIsProfileMenuOpen((current) => !current)}
+            onOpenAccount={() => {
+              setIsProfileMenuOpen(false);
+              onOpenAccount();
+            }}
+            onOpenAuth={(mode) => {
+              setIsProfileMenuOpen(false);
+              onOpenAuth(mode);
+            }}
+            onOpenBilling={() => {
+              setIsProfileMenuOpen(false);
+              onOpenBilling();
+            }}
             onOpenSettings={() => {
               setIsProfileMenuOpen(false);
               onOpenSettings();
+            }}
+            onLogout={() => {
+              setIsProfileMenuOpen(false);
+              onLogout();
             }}
           />
         </div>

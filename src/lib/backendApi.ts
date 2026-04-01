@@ -1,5 +1,11 @@
 import type {
+  AuthResponse,
+  BillingSummary,
+  ChangePlanRequest,
   ChatStreamRequest,
+  LoginRequest,
+  PlanSummary,
+  RegisterRequest,
   StreamChunk,
   UpdateWorkspaceSettingsRequest,
   WorkspaceBootstrapResponse,
@@ -16,10 +22,15 @@ function setStoredWorkspaceId(workspaceId: string) {
   window.localStorage.setItem(WORKSPACE_STORAGE_KEY, workspaceId);
 }
 
+function clearStoredWorkspaceId() {
+  window.localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+}
+
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const workspaceId = getStoredWorkspaceId();
   const response = await fetch(input, {
     ...init,
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}),
@@ -35,11 +46,13 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const data = (await response.json()) as T;
   const nextWorkspaceId =
     typeof data === 'object' && data && 'workspaceId' in data
-      ? String((data as Record<string, unknown>).workspaceId)
-      : null;
+      ? (data as Record<string, unknown>).workspaceId
+      : undefined;
 
-  if (nextWorkspaceId) {
+  if (typeof nextWorkspaceId === 'string' && nextWorkspaceId) {
     setStoredWorkspaceId(nextWorkspaceId);
+  } else if (nextWorkspaceId === null) {
+    clearStoredWorkspaceId();
   }
 
   return data;
@@ -47,6 +60,33 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
 
 export async function bootstrapWorkspace() {
   return requestJson<WorkspaceBootstrapResponse>('/api/bootstrap');
+}
+
+export async function registerAccount(payload: RegisterRequest) {
+  return requestJson<AuthResponse>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function loginAccount(payload: LoginRequest) {
+  return requestJson<AuthResponse>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function logoutAccount() {
+  return requestJson<{ success: boolean }>('/api/auth/logout', {
+    method: 'POST',
+  });
+}
+
+export async function changeBillingPlan(payload: ChangePlanRequest) {
+  return requestJson<{ billingSummary: BillingSummary; plans: PlanSummary[] }>('/api/billing/subscribe', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function updateWorkspaceSettings(payload: UpdateWorkspaceSettingsRequest) {
@@ -73,6 +113,7 @@ export async function* streamBackendChat(payload: ChatStreamRequest): AsyncGener
   const workspaceId = getStoredWorkspaceId();
   const response = await fetch('/api/chat/stream', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}),

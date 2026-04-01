@@ -12,6 +12,7 @@ import ConversationNode from './components/ConversationNode';
 import FolderNode from './components/FolderNode';
 import StartNode from './components/StartNode';
 import Sidebar from './components/Sidebar';
+import AccountPanel from './components/AccountPanel';
 import ContextMenu from './components/ContextMenu';
 import { getProviderCatalogEntry, PROVIDER_CATALOG } from './lib/modelCatalog';
 import {
@@ -60,7 +61,18 @@ const Canvas = () => {
     setSelectedModel,
     providerConfigs,
     providerStatus,
+    currentUser,
+    billingSummary,
+    plans,
+    deploymentMode,
+    byokEnabled,
+    allowGuest,
+    requiresLogin,
     updateProviderConfig,
+    loginAccount,
+    registerAccount,
+    logoutAccount,
+    changePlan,
     archiveNodes,
     unarchiveNode,
     deleteNode,
@@ -74,6 +86,8 @@ const Canvas = () => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; isFolder: boolean; isPane: boolean; nodeId: string | null } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [undoSnapshot, setUndoSnapshot] = useState<DeletedNodesSnapshot | null>(null);
+  const [isAccountPanelOpen, setIsAccountPanelOpen] = useState(false);
+  const [accountPanelView, setAccountPanelView] = useState<'account' | 'billing' | 'login' | 'register'>('login');
 
   useEffect(() => {
     void bootstrapWorkspace();
@@ -113,10 +127,21 @@ const Canvas = () => {
     })
   );
   const isProviderConfigured = Boolean(selectedProviderStatus?.available || selectedProviderConfig.apiKey.trim());
+  const canUseCurrentWorkspace = !requiresLogin || Boolean(currentUser);
+  const isProviderReadyForComposer = isProviderConfigured && canUseCurrentWorkspace;
+
+  const openAccountPanel = useCallback((view: 'account' | 'billing' | 'login' | 'register') => {
+    setAccountPanelView(view);
+    setIsAccountPanelOpen(true);
+  }, []);
 
   // Ensure at least one canvas exists
   useEffect(() => {
     if (!isWorkspaceReady) {
+      return;
+    }
+
+    if (requiresLogin && !currentUser) {
       return;
     }
 
@@ -125,7 +150,13 @@ const Canvas = () => {
     } else if (!currentCanvasId) {
       setCurrentCanvas(canvases[0].id);
     }
-  }, [addCanvas, canvases, currentCanvasId, isWorkspaceReady, setCurrentCanvas]);
+  }, [addCanvas, canvases, currentCanvasId, currentUser, isWorkspaceReady, requiresLogin, setCurrentCanvas]);
+
+  useEffect(() => {
+    if (isWorkspaceReady && requiresLogin && !currentUser) {
+      openAccountPanel('login');
+    }
+  }, [currentUser, isWorkspaceReady, openAccountPanel, requiresLogin]);
 
   useEffect(() => {
     if (!currentCanvasId || rootStartNode) return;
@@ -444,8 +475,15 @@ const Canvas = () => {
   }, [globalInput, pendingBranch, setNodes, setEdges, setPendingBranch]);
 
   const onGlobalSubmit = async () => {
+    if ((!globalInput.trim() && composerAttachments.length === 0) || isCurrentCanvasProcessing) return;
+
+    if (!canUseCurrentWorkspace) {
+      openAccountPanel('login');
+      return;
+    }
+
     if (!currentCanvasId) return;
-    if ((!globalInput.trim() && composerAttachments.length === 0) || isCurrentCanvasProcessing || !isProviderConfigured) return;
+    if (!isProviderConfigured) return;
 
     const hasUnsupportedAttachments = composerAttachments.some((attachment) =>
       attachment.kind === 'image' ? !supportsImageUpload : !supportsPdfUpload
@@ -571,6 +609,13 @@ const Canvas = () => {
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canUseCurrentWorkspace) {
+      setComposerNotice('请先登录，再上传文件并开始对话。');
+      openAccountPanel('login');
+      event.target.value = '';
+      return;
+    }
+
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
 
@@ -777,6 +822,10 @@ const Canvas = () => {
   const shouldShowReadyScreen =
     conversationNodes.length === 0 &&
     !isCurrentCanvasProcessing;
+  const activeComposerNotice =
+    requiresLogin && !currentUser
+      ? '请先登录，再创建工作区并开始对话。'
+      : composerNotice;
 
   return (
     <div className="relative flex w-full h-screen bg-canvas-bg overflow-hidden font-sans">
@@ -785,7 +834,18 @@ const Canvas = () => {
         <div className="absolute right-[-8%] top-[14%] h-[20rem] w-[20rem] rounded-full bg-[radial-gradient(circle,_rgba(0,113,227,0.08)_0%,_rgba(0,113,227,0)_72%)]" />
         <div className="absolute inset-x-0 bottom-0 h-40 bg-[linear-gradient(180deg,rgba(255,255,255,0)_0%,rgba(255,255,255,0.72)_100%)]" />
       </div>
-      <Sidebar onOpenSettings={() => setIsSettingsOpen(true)} />
+      <Sidebar
+        billingSummary={billingSummary}
+        currentUser={currentUser}
+        onLogout={() => {
+          void logoutAccount();
+        }}
+        onOpenAccount={() => openAccountPanel('account')}
+        onOpenAuth={(mode) => openAccountPanel(mode)}
+        onOpenBilling={() => openAccountPanel('billing')}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        plans={plans}
+      />
 
       <main className="flex-1 relative flex flex-col min-w-0">
         <div className="flex-1 relative">
@@ -864,11 +924,33 @@ const Canvas = () => {
           ) : null}
         </Suspense>
 
+        <AccountPanel
+          allowGuest={allowGuest}
+          billingSummary={billingSummary}
+          byokEnabled={byokEnabled}
+          currentUser={currentUser}
+          deploymentMode={deploymentMode}
+          isOpen={isAccountPanelOpen}
+          onChangePlan={changePlan}
+          onClose={() => {
+            if (requiresLogin && !currentUser) {
+              return;
+            }
+            setIsAccountPanelOpen(false);
+          }}
+          onLogin={loginAccount}
+          onLogout={logoutAccount}
+          onRegister={registerAccount}
+          plans={plans}
+          requiresLogin={requiresLogin}
+          view={currentUser && (accountPanelView === 'login' || accountPanelView === 'register') ? 'account' : accountPanelView}
+        />
+
         <ChatComposer
           attachments={composerAttachments}
-          composerNotice={composerNotice}
+          composerNotice={activeComposerNotice}
           isCurrentCanvasProcessing={isCurrentCanvasProcessing}
-          isProviderConfigured={isProviderConfigured}
+          isProviderConfigured={isProviderReadyForComposer}
           modelMenuItems={modelMenuItems}
           onChange={setGlobalInput}
           onFileChange={handleFileChange}
@@ -880,6 +962,11 @@ const Canvas = () => {
           onRemoveAttachment={removeAttachment}
           onSubmit={onGlobalSubmit}
           onUnsupportedUpload={() => {
+            if (!canUseCurrentWorkspace) {
+              openAccountPanel('login');
+              return;
+            }
+
             setComposerNotice('当前模型不支持上传图片/PDF。请切换到支持视觉的模型，例如 Qwen 3.5 Plus 或 Gemini 2.5 Flash。');
           }}
           pendingBranch={pendingBranch}
@@ -889,6 +976,7 @@ const Canvas = () => {
           selectedProvider={selectedProvider}
           selectedProviderId={selectedProviderId}
           supportsAnyUpload={supportsAnyUpload}
+          placeholderOverride={requiresLogin && !currentUser ? 'Sign in to create a workspace...' : undefined}
           value={globalInput}
         />
 

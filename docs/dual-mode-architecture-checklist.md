@@ -13,15 +13,15 @@ The frontend should no longer call model vendors directly.
 
 ## Target Outcome
 
-- [ ] One frontend supports both `platform-managed credentials` and `user-provided credentials`.
-- [ ] API keys are never permanently stored in browser state.
-- [ ] All model calls stream through one backend contract.
+- [x] One frontend supports both `platform-managed credentials` and `user-provided credentials`.
+- [x] API keys are never permanently stored in browser state.
+- [x] All model calls stream through one backend contract.
 - [ ] File upload, image understanding, PDF support, and reasoning output are normalized by backend adapters.
-- [ ] Canvas/chat persistence can run in SaaS mode and self-hosted mode with the same frontend.
+- [x] Canvas/chat persistence can run in SaaS mode and self-hosted mode with the same frontend.
 
 ## Current State
 
-These parts were the original frontend-direct paths. The model path has now been moved behind the backend, and the remaining persistence/config work should continue from the new API layer:
+These parts were the original frontend-direct paths. The model path and persistence path now run behind the backend, and the remaining work should continue from the new API layer:
 
 - `src/lib/ai.ts`
 - parts of `src/App.tsx`
@@ -59,10 +59,10 @@ Use a BFF layer.
 
 ## Phase 0: Freeze the Contract
 
-- [ ] Define a single backend stream contract for all models.
-- [ ] Define a single model metadata contract for all providers.
-- [ ] Define one credential resolution strategy.
-- [ ] Decide the first auth mode for rollout.
+- [x] Define a single backend stream contract for all models.
+- [x] Define a single model metadata contract for all providers.
+- [x] Define one credential resolution strategy.
+- [x] Decide the first auth mode for rollout.
 
 Recommended contracts:
 
@@ -92,11 +92,11 @@ Credential modes to support:
 
 ## Phase 1: Introduce a Backend Skeleton
 
-- [ ] Create a `server/` workspace.
-- [ ] Add an Express entrypoint.
-- [ ] Add route modules.
-- [ ] Add provider adapter modules.
-- [ ] Add shared API types.
+- [x] Create a `server/` workspace.
+- [x] Add an Express entrypoint.
+- [x] Add route modules.
+- [x] Add provider adapter modules.
+- [x] Add shared API types.
 
 Suggested structure:
 
@@ -117,10 +117,10 @@ Suggested structure:
 
 This is the highest-value first migration.
 
-- [ ] Move the logic from `src/lib/ai.ts` into backend adapters.
-- [ ] Create a backend streaming endpoint.
-- [ ] Update the frontend to call `/api/chat/stream` instead of vendor APIs.
-- [ ] Keep the existing streaming UI in place.
+- [x] Move the logic from `src/lib/ai.ts` into backend adapters.
+- [x] Create a backend streaming endpoint.
+- [x] Update the frontend to call `/api/chat/stream` instead of vendor APIs.
+- [x] Keep the existing streaming UI in place.
 
 Current frontend files to change:
 
@@ -130,16 +130,16 @@ Current frontend files to change:
 
 Backend deliverables:
 
-- [ ] `gemini` adapter
-- [ ] `openai-compatible` adapter
-- [ ] unified chunk normalizer for `content` and `reasoning`
-- [ ] provider-aware error normalization
+- [x] `gemini` adapter
+- [x] `openai-compatible` adapter
+- [x] unified chunk normalizer for `content` and `reasoning`
+- [x] provider-aware error normalization
 
 Definition of done:
 
-- [ ] Frontend never sends vendor API keys to model vendors directly.
-- [ ] Existing streaming UX still works.
-- [ ] Existing reasoning panel still works.
+- [x] Frontend never sends vendor API keys to model vendors directly.
+- [x] Existing streaming UX still works.
+- [x] Existing reasoning panel still works.
 
 ## Phase 3: Move File Upload Behind the Backend
 
@@ -170,9 +170,9 @@ Definition of done:
 
 ## Phase 4: Add Credential Resolution for Dual Mode
 
-- [ ] Implement one resolver that decides which credential source applies to a request.
-- [ ] Support SaaS mode and BYOK mode through the same API.
-- [ ] Store user-provided credentials only on the backend.
+- [x] Implement one resolver that decides which credential source applies to a request.
+- [x] Support SaaS mode and BYOK mode through the same API.
+- [x] Store user-provided credentials only on the backend.
 
 Suggested backend rule:
 
@@ -190,16 +190,16 @@ Suggested fields:
 
 Definition of done:
 
-- [ ] frontend settings page edits backend-managed credentials, not browser-only state
-- [ ] no long-lived secret stays in Zustand/localStorage
+- [x] frontend settings page edits backend-managed credentials, not browser-only state
+- [x] no long-lived secret stays in Zustand/localStorage
 
 ## Phase 5: Move Canvas Persistence Behind the Backend
 
 This can be incremental. Do not block earlier phases on it.
 
-- [ ] Replace direct frontend persistence calls with backend APIs.
-- [ ] Decide whether Firebase remains an implementation detail or is replaced.
-- [ ] Move ownership of persistence subscriptions out of the browser-vendor direct path.
+- [x] Replace direct frontend persistence calls with backend APIs.
+- [x] Decide whether Firebase remains an implementation detail or is replaced.
+- [x] Move ownership of persistence subscriptions out of the browser-vendor direct path.
 
 Legacy frontend files this phase replaces:
 
@@ -211,10 +211,11 @@ Options:
 - `Option A`: keep Firebase behind backend service methods
 - `Option B`: move to SQL/NoSQL owned by your backend
 
-Recommendation:
+Decision taken:
 
-- Start with `Option A` if speed matters.
-- Move to `Option B` when billing, audit logs, and team workspaces become important.
+- Firebase was removed from the runtime path.
+- The backend now owns persistence with Supabase/Postgres.
+- Auth, billing, and workspace ownership now share one database layer.
 
 Definition of done:
 
@@ -223,10 +224,10 @@ Definition of done:
 
 ## Phase 6: SaaS-Specific Features
 
-- [ ] add user accounts and session handling
-- [ ] add plan/entitlement checks
-- [ ] add usage metering
-- [ ] add cost accounting
+- [x] add user accounts and session handling
+- [x] add plan/entitlement checks
+- [x] add usage metering
+- [x] add cost accounting
 - [ ] add rate limiting
 - [ ] add abuse protection
 - [ ] add request logs and audit trails

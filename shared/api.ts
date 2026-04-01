@@ -3,6 +3,38 @@ import type { ModelOption, ProviderCatalogEntry, ProviderCatalogId } from './mod
 
 export type DeploymentMode = 'saas' | 'self-hosted';
 export type CredentialSource = 'platform' | 'user' | 'none';
+export type SubscriptionStatus = 'active' | 'trialing' | 'canceled';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName: string;
+  createdAt: number;
+}
+
+export interface PlanSummary {
+  id: string;
+  label: string;
+  description: string;
+  priceCentsMonthly: number;
+  monthlyTokenLimit: number;
+  monthlyMessageLimit: number;
+  features: string[];
+  isDefault?: boolean;
+}
+
+export interface BillingSummary {
+  planId: string;
+  status: SubscriptionStatus;
+  periodStart: number;
+  periodEnd: number;
+  usedTokens: number;
+  usedMessages: number;
+  remainingTokens: number;
+  remainingMessages: number;
+  priceCentsMonthly: number;
+  canUsePlatformModels: boolean;
+}
 
 export interface ProviderRuntimeStatus {
   providerId: ProviderCatalogId;
@@ -14,9 +46,14 @@ export interface ProviderRuntimeStatus {
 }
 
 export interface WorkspaceBootstrapResponse {
-  workspaceId: string;
+  workspaceId: string | null;
   deploymentMode: DeploymentMode;
   byokEnabled: boolean;
+  allowGuest: boolean;
+  requiresLogin: boolean;
+  currentUser: AuthUser | null;
+  billingSummary: BillingSummary | null;
+  plans: PlanSummary[];
   providers: ProviderCatalogEntry[];
   providerStatus: Record<ProviderCatalogId, ProviderRuntimeStatus>;
   providerConfigs: Record<ProviderCatalogId, ProviderConfig>;
@@ -31,6 +68,27 @@ export interface UpdateWorkspaceSettingsRequest {
   selectedModel?: string;
   providerConfigs?: Partial<Record<ProviderCatalogId, Partial<ProviderConfig> & { clearStoredApiKey?: boolean }>>;
   sidebarFolders?: SidebarFolder[];
+}
+
+export interface RegisterRequest {
+  email: string;
+  password: string;
+  displayName: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  user: AuthUser;
+  workspaceId: string | null;
+  billingSummary: BillingSummary | null;
+}
+
+export interface ChangePlanRequest {
+  planId: string;
 }
 
 export interface UpsertCanvasRequest {
@@ -71,6 +129,7 @@ export interface ModelsResponse {
 
 export interface WorkspaceRecord {
   id: string;
+  ownerUserId?: string | null;
   selectedProviderId: ProviderCatalogId;
   selectedModel: string;
   providerConfigs: Record<ProviderCatalogId, ProviderConfig>;

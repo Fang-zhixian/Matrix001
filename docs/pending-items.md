@@ -14,13 +14,18 @@
 
 ## P1
 
-- [ ] Backend session/bootstrap lifecycle still needs polish
-  Problem: the app now bootstraps through the backend, but workspace initialization, recovery, and future authenticated session handling still need a cleaner central ownership model.
-  Suggested direction: keep workspace bootstrap in one place, formalize revalidation and failure recovery, and prepare the path for real authenticated accounts.
-  Files: `src/store.ts`, `src/App.tsx`, `server/src/routes/api.ts`
+- [ ] Payment processor integration is still missing
+  Problem: plans, quotas, and subscriptions now exist in the backend, but there is not yet a real billing provider such as Stripe to charge users, collect payment methods, or handle renewal webhooks.
+  Suggested direction: add a billing provider service, checkout/session endpoints, webhook handling, and subscription state reconciliation.
+  Files: `server/src/routes/api.ts`, `server/src/services/billingService.ts`, `shared/api.ts`, `src/components/AccountPanel.tsx`
 
-- [ ] Firestore sync strategy is still too chatty
-  Problem: many canvas mutations save immediately, which is functional but not efficient and will become noisy under frequent edits or multiple tabs.
+- [ ] Supabase Postgres still relies on startup schema bootstrapping instead of explicit migrations
+  Problem: the backend now targets Supabase/Postgres directly, but schema evolution is still done in application startup code rather than versioned SQL migrations.
+  Suggested direction: add a migration workflow and a schema history so production rollouts are auditable and repeatable.
+  Files: `server/src/storage/database.ts`, `README.md`
+
+- [ ] Canvas persistence is still too chatty
+  Problem: many canvas mutations save immediately through the backend, which is functional but will become noisy under frequent edits or multiple tabs.
   Suggested direction: add debounced persistence for non-critical updates and keep immediate sync only for actions that truly require it.
   Files: `src/store.ts`
 
@@ -32,7 +37,7 @@
 - [ ] Multi-modal PDF path is not fully verified across providers
   Problem: image flow has been tested more thoroughly than PDF flow; PDF behavior likely varies by provider and model.
   Suggested direction: run provider-by-provider validation and mark unsupported combinations explicitly in UI.
-  Files: `src/lib/ai.ts`, `src/App.tsx`, `src/components/ConversationNode.tsx`
+  Files: `server/src/services/chatService.ts`, `src/App.tsx`, `src/components/ConversationNode.tsx`
 
 - [ ] Canvas workspace is not yet lazy-loaded as a separate runtime layer
   Problem: bundle splitting is much better now, but `reactflow` and canvas-specific runtime are still part of the initial app path.

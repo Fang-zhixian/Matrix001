@@ -3,6 +3,8 @@ import express from 'express';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import apiRouter from './routes/api.js';
+import { ensureDatabaseReady } from './storage/database.js';
+import { HttpError } from './utils/httpError.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -36,9 +38,16 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     return;
   }
 
-  response.status(500).json({ error: message });
+  response.status(error instanceof HttpError ? error.status : 500).json({ error: message });
 });
 
-app.listen(port, () => {
-  console.log(`Matrix001 server listening on http://localhost:${port}`);
-});
+ensureDatabaseReady()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`Matrix001 server listening on http://localhost:${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error('Failed to initialize database connection.', error);
+    process.exit(1);
+  });

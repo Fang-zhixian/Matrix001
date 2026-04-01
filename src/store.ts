@@ -29,7 +29,11 @@ import {
 } from './lib/canvasStoreUtils';
 import {
   bootstrapWorkspace as bootstrapWorkspaceFromBackend,
+  changeBillingPlan,
   deleteCanvasFromBackend,
+  loginAccount as loginAccountRequest,
+  logoutAccount as logoutAccountRequest,
+  registerAccount as registerAccountRequest,
   saveCanvasToBackend as saveCanvasToBackendRequest,
   updateWorkspaceSettings,
 } from './lib/backendApi';
@@ -44,7 +48,14 @@ import type {
   SidebarFolder,
   SyncStatus,
 } from './types/canvas';
-import type { ProviderRuntimeStatus, WorkspaceBootstrapResponse } from '../shared/api';
+import type {
+  AuthUser,
+  BillingSummary,
+  DeploymentMode,
+  PlanSummary,
+  ProviderRuntimeStatus,
+  WorkspaceBootstrapResponse,
+} from '../shared/api';
 
 export type {
   AttachmentPayload,
@@ -91,6 +102,37 @@ function createInitialProviderStatus(): Record<ProviderCatalogId, ProviderRuntim
 
 let settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
+function applyBootstrapPayload(
+  set: (partial: Partial<RFState>) => void,
+  get: () => RFState,
+  payload: WorkspaceBootstrapResponse
+) {
+  const nextCurrentCanvasId =
+    get().currentCanvasId && payload.canvases.some((canvas) => canvas.id === get().currentCanvasId)
+      ? get().currentCanvasId
+      : payload.canvases[0]?.id ?? null;
+
+  set({
+    workspaceId: payload.workspaceId,
+    canvases: payload.canvases,
+    sidebarFolders: mergeSidebarFolders(payload.sidebarFolders, payload.canvases),
+    currentCanvasId: nextCurrentCanvasId,
+    selectedProviderId: payload.selectedProviderId,
+    selectedModel: payload.selectedModel,
+    providerConfigs: payload.providerConfigs,
+    providerStatus: payload.providerStatus,
+    currentUser: payload.currentUser,
+    billingSummary: payload.billingSummary,
+    plans: payload.plans,
+    deploymentMode: payload.deploymentMode,
+    byokEnabled: payload.byokEnabled,
+    allowGuest: payload.allowGuest,
+    requiresLogin: payload.requiresLogin,
+    isWorkspaceReady: true,
+    syncStatus: 'synced',
+  });
+}
+
 export type RFState = {
   canvases: Canvas[];
   sidebarFolders: SidebarFolder[];
@@ -101,6 +143,13 @@ export type RFState = {
   selectedModel: string;
   providerConfigs: Record<ProviderCatalogId, ProviderConfig>;
   providerStatus: Record<ProviderCatalogId, ProviderRuntimeStatus>;
+  currentUser: AuthUser | null;
+  billingSummary: BillingSummary | null;
+  plans: PlanSummary[];
+  deploymentMode: DeploymentMode;
+  byokEnabled: boolean;
+  allowGuest: boolean;
+  requiresLogin: boolean;
   workspaceId: string | null;
   isWorkspaceReady: boolean;
   syncStatus: SyncStatus;
@@ -108,6 +157,10 @@ export type RFState = {
   // Actions
   setSyncStatus: (status: SyncStatus) => void;
   bootstrapWorkspace: () => Promise<void>;
+  registerAccount: (payload: { email: string; password: string; displayName: string }) => Promise<void>;
+  loginAccount: (payload: { email: string; password: string }) => Promise<void>;
+  logoutAccount: () => Promise<void>;
+  changePlan: (planId: string) => Promise<void>;
   setCurrentCanvas: (id: string) => void;
   setSelectedProvider: (providerId: ProviderCatalogId) => void;
   setSelectedModel: (model: string) => void;
@@ -230,6 +283,13 @@ const useStore = create<RFState>()(
         selectedModel: getDefaultModelForProvider('gemini'),
         providerConfigs: createInitialProviderConfigs(),
         providerStatus: createInitialProviderStatus(),
+        currentUser: null,
+        billingSummary: null,
+        plans: [],
+        deploymentMode: 'self-hosted',
+        byokEnabled: true,
+        allowGuest: true,
+        requiresLogin: false,
         workspaceId: null,
         isWorkspaceReady: false,
         syncStatus: 'offline',
@@ -240,26 +300,62 @@ const useStore = create<RFState>()(
           try {
             set({ syncStatus: 'syncing' });
             const payload: WorkspaceBootstrapResponse = await bootstrapWorkspaceFromBackend();
-            const nextCurrentCanvasId =
-              get().currentCanvasId && payload.canvases.some((canvas) => canvas.id === get().currentCanvasId)
-                  ? get().currentCanvasId
-                  : payload.canvases[0]?.id ?? null;
-
-            set({
-              workspaceId: payload.workspaceId,
-              canvases: payload.canvases,
-              sidebarFolders: mergeSidebarFolders(payload.sidebarFolders, payload.canvases),
-              currentCanvasId: nextCurrentCanvasId,
-              selectedProviderId: payload.selectedProviderId,
-              selectedModel: payload.selectedModel,
-              providerConfigs: payload.providerConfigs,
-              providerStatus: payload.providerStatus,
-              isWorkspaceReady: true,
-              syncStatus: 'synced',
-            });
+            applyBootstrapPayload(set, get, payload);
           } catch (error) {
             console.error('Error bootstrapping workspace:', error);
             set({ isWorkspaceReady: true, syncStatus: 'error' });
+          }
+        },
+
+        registerAccount: async (payload) => {
+          set({ syncStatus: 'syncing' });
+          try {
+            await registerAccountRequest(payload);
+            applyBootstrapPayload(set, get, await bootstrapWorkspaceFromBackend());
+          } catch (error) {
+            console.error('Error registering account:', error);
+            set({ syncStatus: 'error' });
+            throw error;
+          }
+        },
+
+        loginAccount: async (payload) => {
+          set({ syncStatus: 'syncing' });
+          try {
+            await loginAccountRequest(payload);
+            applyBootstrapPayload(set, get, await bootstrapWorkspaceFromBackend());
+          } catch (error) {
+            console.error('Error logging in:', error);
+            set({ syncStatus: 'error' });
+            throw error;
+          }
+        },
+
+        logoutAccount: async () => {
+          set({ syncStatus: 'syncing' });
+          try {
+            await logoutAccountRequest();
+            applyBootstrapPayload(set, get, await bootstrapWorkspaceFromBackend());
+          } catch (error) {
+            console.error('Error logging out:', error);
+            set({ syncStatus: 'error' });
+            throw error;
+          }
+        },
+
+        changePlan: async (planId) => {
+          set({ syncStatus: 'syncing' });
+          try {
+            const payload = await changeBillingPlan({ planId });
+            set({
+              billingSummary: payload.billingSummary,
+              plans: payload.plans,
+              syncStatus: 'synced',
+            });
+          } catch (error) {
+            console.error('Error changing plan:', error);
+            set({ syncStatus: 'error' });
+            throw error;
           }
         },
 

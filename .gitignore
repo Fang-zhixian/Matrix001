@@ -3,6 +3,9 @@ build/
 dist/
 server/dist/
 server/data/workspaces/
+server/data/*.sqlite
+server/data/*.sqlite-shm
+server/data/*.sqlite-wal
 coverage/
 .DS_Store
 *.log
