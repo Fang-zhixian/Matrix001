@@ -28,7 +28,6 @@ const Sidebar = ({ onOpenSettings }: { onOpenSettings: () => void }) => {
     renameSidebarFolder,
     deleteSidebarFolder,
     moveCanvasToFolder,
-    user,
   } = useStore();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -444,7 +443,7 @@ const Sidebar = ({ onOpenSettings }: { onOpenSettings: () => void }) => {
         <div className="border-t border-[#e6e6ea] px-3 py-3">
           <SidebarProfileMenu
             isOpen={isProfileMenuOpen}
-            user={user}
+            user={null}
             onToggle={() => setIsProfileMenuOpen((current) => !current)}
             onOpenSettings={() => {
               setIsProfileMenuOpen(false);

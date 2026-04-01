@@ -1,5 +1,5 @@
 import type { Edge, Node } from 'reactflow';
-import type { StartNodeData } from '../lib/startNode';
+import type { StartNodeData } from '../lib/startNode.js';
 
 export interface Message {
   role: 'user' | 'model';
@@ -70,6 +70,8 @@ export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 export interface ProviderConfig {
   apiKey: string;
   baseUrl: string;
+  hasStoredApiKey?: boolean;
+  credentialSource?: 'platform' | 'user' | 'none';
 }
 
 export interface DeletedNodesSnapshot {

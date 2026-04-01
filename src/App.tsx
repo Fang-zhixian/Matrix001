@@ -13,7 +13,6 @@ import FolderNode from './components/FolderNode';
 import StartNode from './components/StartNode';
 import Sidebar from './components/Sidebar';
 import ContextMenu from './components/ContextMenu';
-import { mergeUserProfile, subscribeToAuthChanges } from './firebase';
 import { getProviderCatalogEntry, PROVIDER_CATALOG } from './lib/modelCatalog';
 import {
   inferMimeType,
@@ -54,15 +53,14 @@ const Canvas = () => {
     updateNodeDataForCanvas,
     setNodes,
     setEdges,
-    setUser,
-    setAuthReady,
+    bootstrapWorkspace,
     selectedProviderId,
     selectedModel,
     setSelectedProvider,
     setSelectedModel,
     providerConfigs,
+    providerStatus,
     updateProviderConfig,
-    loadCanvasesFromFirestore,
     archiveNodes,
     unarchiveNode,
     deleteNode,
@@ -70,40 +68,16 @@ const Canvas = () => {
     deletedNodesSnapshot,
     undoDelete,
     restoreDeletedSnapshot,
+    isWorkspaceReady,
   } = useStore();
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; isFolder: boolean; isPane: boolean; nodeId: string | null } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [undoSnapshot, setUndoSnapshot] = useState<DeletedNodesSnapshot | null>(null);
 
-  // Firebase Auth Listener
   useEffect(() => {
-    let isActive = true;
-    let unsubscribe: (() => void) | undefined;
-
-    void subscribeToAuthChanges(async (user) => {
-      if (!isActive) return;
-
-      setUser(user);
-      setAuthReady(true);
-
-      if (user) {
-        await mergeUserProfile(user);
-        loadCanvasesFromFirestore();
-      }
-    }).then((nextUnsubscribe) => {
-      if (isActive) {
-        unsubscribe = nextUnsubscribe;
-      } else {
-        nextUnsubscribe();
-      }
-    });
-
-    return () => {
-      isActive = false;
-      unsubscribe?.();
-    };
-  }, [setUser, setAuthReady, loadCanvasesFromFirestore]);
+    void bootstrapWorkspace();
+  }, [bootstrapWorkspace]);
 
   const currentCanvas = useMemo(() => 
     canvases.find(c => c.id === currentCanvasId) || null
@@ -123,6 +97,7 @@ const Canvas = () => {
   const [canvasInteractionMode, setCanvasInteractionMode] = useState<CanvasInteractionMode>('drag');
   const selectedProvider = getProviderCatalogEntry(selectedProviderId);
   const selectedProviderConfig = providerConfigs[selectedProviderId];
+  const selectedProviderStatus = providerStatus[selectedProviderId];
   const selectedModelOption = selectedProvider.models.find((model) => model.id === selectedModel) ?? selectedProvider.models[0];
   const selectedModelCapabilities = selectedModelOption?.capabilities ?? {};
   const supportsImageUpload = Boolean(selectedModelCapabilities.image);
@@ -131,25 +106,26 @@ const Canvas = () => {
   const modelMenuItems = PROVIDER_CATALOG.flatMap((provider) =>
     provider.models.map((model) => {
       const config = providerConfigs[provider.id];
-      const isConfigured = provider.protocol === 'gemini'
-        ? Boolean(config.apiKey.trim())
-        : Boolean(config.apiKey.trim() && config.baseUrl.trim());
+      const status = providerStatus[provider.id];
+      const isConfigured = Boolean(status?.available || config.apiKey.trim());
 
       return { provider, model, isConfigured };
     })
   );
-  const isProviderConfigured = selectedProvider.protocol === 'gemini'
-    ? Boolean(selectedProviderConfig.apiKey.trim())
-    : Boolean(selectedProviderConfig.apiKey.trim() && selectedProviderConfig.baseUrl.trim());
+  const isProviderConfigured = Boolean(selectedProviderStatus?.available || selectedProviderConfig.apiKey.trim());
 
   // Ensure at least one canvas exists
   useEffect(() => {
+    if (!isWorkspaceReady) {
+      return;
+    }
+
     if (canvases.length === 0) {
       addCanvas();
     } else if (!currentCanvasId) {
       setCurrentCanvas(canvases[0].id);
     }
-  }, [canvases.length, currentCanvasId, addCanvas, setCurrentCanvas]);
+  }, [addCanvas, canvases, currentCanvasId, isWorkspaceReady, setCurrentCanvas]);
 
   useEffect(() => {
     if (!currentCanvasId || rootStartNode) return;
@@ -271,10 +247,8 @@ const Canvas = () => {
 
     try {
       for await (const chunk of streamText({
-        protocol: selectedProvider.protocol,
+        providerId: selectedProviderId,
         model: selectedModel,
-        apiKey: selectedProviderConfig.apiKey.trim(),
-        baseUrl: selectedProviderConfig.baseUrl.trim(),
         messages: requestMessages,
         systemInstruction,
       })) {
@@ -310,9 +284,7 @@ const Canvas = () => {
   }, [
     buildModelMessage,
     selectedModel,
-    selectedProvider.protocol,
-    selectedProviderConfig.apiKey,
-    selectedProviderConfig.baseUrl,
+    selectedProviderId,
     setCenter,
     updateNodeDataForCanvas,
   ]);

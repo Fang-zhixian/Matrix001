@@ -1,10 +1,14 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { ChevronLeft, ChevronUp, Settings2, User } from 'lucide-react';
-import type { User as FirebaseUser } from 'firebase/auth';
+
+type SidebarUser = {
+  displayName?: string | null;
+  photoURL?: string | null;
+};
 
 interface SidebarProfileMenuProps {
   isOpen: boolean;
-  user: FirebaseUser | null;
+  user: SidebarUser | null;
   onToggle: () => void;
   onOpenSettings: () => void;
 }

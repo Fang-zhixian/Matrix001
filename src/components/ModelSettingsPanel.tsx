@@ -148,12 +148,23 @@ const ModelSettingsPanel = ({
                           <label className="block">
                             <span className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                               {selectedProvider.apiKeyLabel}
+                              {selectedConfig.credentialSource && selectedConfig.credentialSource !== 'none' ? (
+                                <span className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[9px] tracking-[0.12em] text-slate-500">
+                                  {selectedConfig.credentialSource === 'platform' ? 'Platform' : 'Stored'}
+                                </span>
+                              ) : null}
                             </span>
                             <input
                               type={showSecrets ? 'text' : 'password'}
                               value={selectedConfig.apiKey}
                               onChange={(e) => onUpdateProviderConfig(selectedProvider.id, { apiKey: e.target.value })}
-                              placeholder={selectedProvider.apiKeyPlaceholder}
+                              placeholder={
+                                selectedConfig.hasStoredApiKey
+                                  ? 'A key is already stored on the server. Enter a new one to replace it.'
+                                  : selectedConfig.credentialSource === 'platform'
+                                    ? 'This provider is using a platform-managed key. Add your own key here if needed.'
+                                    : selectedProvider.apiKeyPlaceholder
+                              }
                               className="w-full rounded-[1.1rem] border border-black/[0.06] bg-white/88 px-4 py-3.5 text-sm text-slate-700 shadow-sm outline-none transition focus:border-[#0071e3]/30 focus:ring-4 focus:ring-[#0071e3]/10"
                             />
                           </label>
@@ -247,7 +258,7 @@ const ModelSettingsPanel = ({
                       </div>
 
                       <p className="px-1 text-xs leading-relaxed text-slate-400">
-                        API keys are stored in your browser local state for convenience. In this app&apos;s current architecture, they are still client-side values.
+                        Provider credentials are now resolved on the backend. The browser only keeps temporary draft values while you edit this panel.
                       </p>
                     </div>
                   </div>

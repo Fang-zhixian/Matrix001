@@ -12,10 +12,10 @@ import {
   OnNodesChange,
   OnEdgesChange,
 } from 'reactflow';
-import type { User as FirebaseUser } from 'firebase/auth';
 import {
   getDefaultBaseUrlForProvider,
   getDefaultModelForProvider,
+  PROVIDER_CATALOG,
   type ProviderCatalogId,
 } from './lib/modelCatalog';
 import { createStartNode } from './lib/startNode';
@@ -23,16 +23,16 @@ import {
   findCanvasById,
   mergeSidebarFolders,
   replaceCanvas,
-  sanitizeCanvasForFirestore,
   shouldPersistNodeChanges,
   updateCanvasById,
   updateCurrentCanvas,
 } from './lib/canvasStoreUtils';
 import {
-  deleteCanvasDocument,
-  saveCanvasDocument,
-  subscribeToCanvasDocuments,
-} from './firebase';
+  bootstrapWorkspace as bootstrapWorkspaceFromBackend,
+  deleteCanvasFromBackend,
+  saveCanvasToBackend as saveCanvasToBackendRequest,
+  updateWorkspaceSettings,
+} from './lib/backendApi';
 import type {
   Canvas,
   CanvasNodeData,
@@ -44,6 +44,7 @@ import type {
   SidebarFolder,
   SyncStatus,
 } from './types/canvas';
+import type { ProviderRuntimeStatus, WorkspaceBootstrapResponse } from '../shared/api';
 
 export type {
   AttachmentPayload,
@@ -59,6 +60,37 @@ export type {
   DeletedNodesSnapshot,
 } from './types/canvas';
 
+function createInitialProviderConfigs(): Record<ProviderCatalogId, ProviderConfig> {
+  return Object.fromEntries(
+    PROVIDER_CATALOG.map((provider) => [
+      provider.id,
+      {
+        apiKey: '',
+        baseUrl: getDefaultBaseUrlForProvider(provider.id),
+        hasStoredApiKey: false,
+        credentialSource: 'none',
+      },
+    ])
+  ) as Record<ProviderCatalogId, ProviderConfig>;
+}
+
+function createInitialProviderStatus(): Record<ProviderCatalogId, ProviderRuntimeStatus> {
+  return Object.fromEntries(
+    PROVIDER_CATALOG.map((provider) => [
+      provider.id,
+      {
+        providerId: provider.id,
+        available: false,
+        credentialSource: 'none',
+        hasStoredUserKey: false,
+        canUsePlatformKey: false,
+      },
+    ])
+  ) as Record<ProviderCatalogId, ProviderRuntimeStatus>;
+}
+
+let settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
 export type RFState = {
   canvases: Canvas[];
   sidebarFolders: SidebarFolder[];
@@ -68,16 +100,14 @@ export type RFState = {
   selectedProviderId: ProviderCatalogId;
   selectedModel: string;
   providerConfigs: Record<ProviderCatalogId, ProviderConfig>;
-  
-  // Auth State
-  user: FirebaseUser | null;
-  isAuthReady: boolean;
+  providerStatus: Record<ProviderCatalogId, ProviderRuntimeStatus>;
+  workspaceId: string | null;
+  isWorkspaceReady: boolean;
   syncStatus: SyncStatus;
   
   // Actions
-  setUser: (user: FirebaseUser | null) => void;
-  setAuthReady: (ready: boolean) => void;
   setSyncStatus: (status: SyncStatus) => void;
+  bootstrapWorkspace: () => Promise<void>;
   setCurrentCanvas: (id: string) => void;
   setSelectedProvider: (providerId: ProviderCatalogId) => void;
   setSelectedModel: (model: string) => void;
@@ -107,18 +137,50 @@ export type RFState = {
   archiveNodes: (nodeIds: string[]) => void;
   unarchiveNode: (folderNodeId: string) => void;
   
-  // Firestore Sync
-  saveCanvasToFirestore: (canvas: Canvas) => Promise<void>;
-  loadCanvasesFromFirestore: () => void;
+  // Backend Sync
+  saveCanvasToBackend: (canvas: Canvas) => Promise<void>;
 };
 
 const useStore = create<RFState>()(
   persist(
     (set, get) => {
+      const persistWorkspaceSettings = () => {
+        if (settingsSaveTimer) {
+          clearTimeout(settingsSaveTimer);
+        }
+
+        settingsSaveTimer = setTimeout(() => {
+          const {
+            selectedProviderId,
+            selectedModel,
+            providerConfigs,
+            sidebarFolders,
+          } = get();
+
+          void updateWorkspaceSettings({
+            selectedProviderId,
+            selectedModel,
+            providerConfigs,
+            sidebarFolders,
+          }).then((payload) => {
+            set({
+              workspaceId: payload.workspaceId,
+              providerConfigs: payload.providerConfigs,
+              providerStatus: payload.providerStatus,
+              selectedProviderId: payload.selectedProviderId,
+              selectedModel: payload.selectedModel,
+              sidebarFolders: payload.sidebarFolders,
+            });
+          }).catch((error) => {
+            console.error('Error saving workspace settings:', error);
+            set({ syncStatus: 'error' });
+          });
+        }, 250);
+      };
+
       const persistCanvas = (canvas: Canvas | null | undefined) => {
-        const { user } = get();
-        if (user && canvas) {
-          get().saveCanvasToFirestore(canvas);
+        if (canvas) {
+          void get().saveCanvasToBackend(canvas);
         }
       };
 
@@ -135,7 +197,7 @@ const useStore = create<RFState>()(
           canvases,
           ...(options?.currentCanvasId !== undefined ? { currentCanvasId: options.currentCanvasId } : {}),
           ...(options?.pendingBranch !== undefined ? { pendingBranch: options.pendingBranch } : {}),
-          ...(options?.sidebarFolders ? { sidebarFolders: options.sidebarFolders } : {}),
+          ...(options?.sidebarFolders !== undefined ? { sidebarFolders: options.sidebarFolders } : {}),
         });
 
         persistCanvas(options?.persistedCanvas);
@@ -159,157 +221,138 @@ const useStore = create<RFState>()(
       };
 
       return {
-      canvases: [],
-      sidebarFolders: [],
-      currentCanvasId: null,
-      pendingBranch: null,
-      deletedNodesSnapshot: null,
-      selectedProviderId: 'gemini',
-      selectedModel: getDefaultModelForProvider('gemini'),
-      providerConfigs: {
-        gemini: {
-          apiKey: process.env.GEMINI_API_KEY || '',
-          baseUrl: '',
-        },
-        deepseek: {
-          apiKey: '',
-          baseUrl: getDefaultBaseUrlForProvider('deepseek'),
-        },
-        qwen: {
-          apiKey: '',
-          baseUrl: getDefaultBaseUrlForProvider('qwen'),
-        },
-        moonshot: {
-          apiKey: '',
-          baseUrl: getDefaultBaseUrlForProvider('moonshot'),
-        },
-        zhipu: {
-          apiKey: '',
-          baseUrl: getDefaultBaseUrlForProvider('zhipu'),
-        },
-      },
-      user: null,
-      isAuthReady: false,
-      syncStatus: 'synced',
+        canvases: [],
+        sidebarFolders: [],
+        currentCanvasId: null,
+        pendingBranch: null,
+        deletedNodesSnapshot: null,
+        selectedProviderId: 'gemini',
+        selectedModel: getDefaultModelForProvider('gemini'),
+        providerConfigs: createInitialProviderConfigs(),
+        providerStatus: createInitialProviderStatus(),
+        workspaceId: null,
+        isWorkspaceReady: false,
+        syncStatus: 'offline',
 
-      setUser: (user) => set({ user }),
-      setAuthReady: (ready) => set({ isAuthReady: ready }),
-      setSyncStatus: (status) => set({ syncStatus: status }),
+        setSyncStatus: (status) => set({ syncStatus: status }),
 
-      setCurrentCanvas: (id) => {
-        set({ currentCanvasId: id, pendingBranch: null });
-      },
+        bootstrapWorkspace: async () => {
+          try {
+            set({ syncStatus: 'syncing' });
+            const payload: WorkspaceBootstrapResponse = await bootstrapWorkspaceFromBackend();
+            const nextCurrentCanvasId =
+              get().currentCanvasId && payload.canvases.some((canvas) => canvas.id === get().currentCanvasId)
+                  ? get().currentCanvasId
+                  : payload.canvases[0]?.id ?? null;
 
-      setSelectedProvider: (providerId) => {
-        set({
-          selectedProviderId: providerId,
-          selectedModel: getDefaultModelForProvider(providerId),
-        });
-      },
+            set({
+              workspaceId: payload.workspaceId,
+              canvases: payload.canvases,
+              sidebarFolders: mergeSidebarFolders(payload.sidebarFolders, payload.canvases),
+              currentCanvasId: nextCurrentCanvasId,
+              selectedProviderId: payload.selectedProviderId,
+              selectedModel: payload.selectedModel,
+              providerConfigs: payload.providerConfigs,
+              providerStatus: payload.providerStatus,
+              isWorkspaceReady: true,
+              syncStatus: 'synced',
+            });
+          } catch (error) {
+            console.error('Error bootstrapping workspace:', error);
+            set({ isWorkspaceReady: true, syncStatus: 'error' });
+          }
+        },
 
-      setSelectedModel: (model) => {
-        set({ selectedModel: model });
-      },
+        setCurrentCanvas: (id) => {
+          set({ currentCanvasId: id, pendingBranch: null });
+        },
 
-      updateProviderConfig: (providerId, patch) => {
-        const currentConfig = get().providerConfigs[providerId];
-        set({
-          providerConfigs: {
-            ...get().providerConfigs,
-            [providerId]: {
-              ...currentConfig,
-              ...patch,
+        setSelectedProvider: (providerId) => {
+          set({
+            selectedProviderId: providerId,
+            selectedModel: getDefaultModelForProvider(providerId),
+          });
+          persistWorkspaceSettings();
+        },
+
+        setSelectedModel: (model) => {
+          set({ selectedModel: model });
+          persistWorkspaceSettings();
+        },
+
+        updateProviderConfig: (providerId, patch) => {
+          const currentConfig = get().providerConfigs[providerId];
+          set({
+            providerConfigs: {
+              ...get().providerConfigs,
+              [providerId]: {
+                ...currentConfig,
+                ...patch,
+              },
             },
-          },
-        });
-      },
+          });
+          persistWorkspaceSettings();
+        },
 
-      saveCanvasToFirestore: async (canvas) => {
-        const { user } = get();
-        if (!user) return;
-
-        set({ syncStatus: 'syncing' });
-        try {
-          const sanitizedCanvas = sanitizeCanvasForFirestore(canvas, user.uid);
-          await saveCanvasDocument(user.uid, canvas.id, sanitizedCanvas);
-          set({ syncStatus: 'synced' });
-        } catch (error) {
-          console.error('Error saving canvas to Firestore:', error);
-          set({ syncStatus: 'error' });
-        }
-      },
-
-      loadCanvasesFromFirestore: () => {
-        const { user } = get();
-        if (!user) return;
-
-        void subscribeToCanvasDocuments(
-          user.uid,
-          (remoteCanvases) => {
-            if (remoteCanvases.length > 0) {
-              const sortedCanvases = remoteCanvases.sort((a, b) => b.lastModified - a.lastModified);
-
-              set({
-                canvases: sortedCanvases,
-                sidebarFolders: mergeSidebarFolders(get().sidebarFolders, sortedCanvases),
-                currentCanvasId: get().currentCanvasId || sortedCanvases[0].id,
-              });
-            }
-          },
-          (error) => {
-            console.error('Firestore onSnapshot error:', error);
+        saveCanvasToBackend: async (canvas) => {
+          set({ syncStatus: 'syncing' });
+          try {
+            await saveCanvasToBackendRequest(canvas);
+            set({ syncStatus: 'synced' });
+          } catch (error) {
+            console.error('Error saving canvas to backend:', error);
             set({ syncStatus: 'error' });
           }
-        );
-      },
+        },
 
-      addCanvas: (options) => {
-        const id = `canvas_${Date.now()}`;
-        const isIncognito = Boolean(options?.incognito);
-        const timestamp = Date.now();
-        const newCanvas: Canvas = {
-          id,
-          name: isIncognito ? 'Private Chat' : `Untitled Canvas ${get().canvases.length + 1}`,
-          nodes: [createStartNode(id)],
-          edges: [],
-          folderId: null,
-          folderName: null,
-          isIncognito,
-          createdAt: timestamp,
-          lastModified: timestamp,
-        };
+        addCanvas: (options) => {
+          const id = `canvas_${Date.now()}`;
+          const isIncognito = Boolean(options?.incognito);
+          const timestamp = Date.now();
+          const newCanvas: Canvas = {
+            id,
+            name: isIncognito ? 'Private Chat' : `Untitled Canvas ${get().canvases.length + 1}`,
+            nodes: [createStartNode(id)],
+            edges: [],
+            folderId: null,
+            folderName: null,
+            isIncognito,
+            createdAt: timestamp,
+            lastModified: timestamp,
+          };
 
-        commitCanvases([newCanvas, ...get().canvases], {
-          currentCanvasId: id,
-          pendingBranch: null,
-        });
-        persistCanvas(newCanvas);
-      },
+          commitCanvases([newCanvas, ...get().canvases], {
+            currentCanvasId: id,
+            pendingBranch: null,
+          });
+          persistCanvas(newCanvas);
+        },
 
-      deleteCanvas: async (id) => {
-        const newCanvases = get().canvases.filter((c) => c.id !== id);
-        let nextCanvasId = get().currentCanvasId;
-        if (nextCanvasId === id) {
-          nextCanvasId = newCanvases.length > 0 ? newCanvases[0].id : null;
-        }
-        set({
-          canvases: newCanvases,
-          currentCanvasId: nextCanvasId,
-          pendingBranch: null,
-          deletedNodesSnapshot: get().deletedNodesSnapshot?.canvasId === id ? null : get().deletedNodesSnapshot,
-        });
-
-        const { user } = get();
-        if (user) {
-          try {
-            await deleteCanvasDocument(user.uid, id);
-          } catch (error) {
-            console.error('Error deleting canvas from Firestore:', error);
+        deleteCanvas: async (id) => {
+          const newCanvases = get().canvases.filter((c) => c.id !== id);
+          let nextCanvasId = get().currentCanvasId;
+          if (nextCanvasId === id) {
+            nextCanvasId = newCanvases.length > 0 ? newCanvases[0].id : null;
           }
-        }
-      },
 
-      updateCanvasName: (id, name) => {
+          set({
+            canvases: newCanvases,
+            currentCanvasId: nextCanvasId,
+            pendingBranch: null,
+            deletedNodesSnapshot:
+              get().deletedNodesSnapshot?.canvasId === id ? null : get().deletedNodesSnapshot,
+          });
+
+          try {
+            await deleteCanvasFromBackend(id);
+            set({ syncStatus: 'synced' });
+          } catch (error) {
+            console.error('Error deleting canvas from backend:', error);
+            set({ syncStatus: 'error' });
+          }
+        },
+
+        updateCanvasName: (id, name) => {
         const result = updateCanvasById(get().canvases, id, (canvas) => ({
           ...canvas,
           name,
@@ -320,23 +363,24 @@ const useStore = create<RFState>()(
         commitCanvasUpdate(result.updatedCanvas);
       },
 
-      createSidebarFolder: (name) => {
-        const timestamp = Date.now();
-        const folderId = `sidebar_folder_${timestamp}`;
-        const nextFolderCount = get().sidebarFolders.length + 1;
-        const newFolder: SidebarFolder = {
-          id: folderId,
-          name: name?.trim() || `Archive ${nextFolderCount}`,
-          createdAt: timestamp,
-          lastModified: timestamp,
-        };
+        createSidebarFolder: (name) => {
+          const timestamp = Date.now();
+          const folderId = `sidebar_folder_${timestamp}`;
+          const nextFolderCount = get().sidebarFolders.length + 1;
+          const newFolder: SidebarFolder = {
+            id: folderId,
+            name: name?.trim() || `Archive ${nextFolderCount}`,
+            createdAt: timestamp,
+            lastModified: timestamp,
+          };
 
-        set({
-          sidebarFolders: [newFolder, ...get().sidebarFolders],
-        });
+          set({
+            sidebarFolders: [newFolder, ...get().sidebarFolders],
+          });
+          persistWorkspaceSettings();
 
-        return folderId;
-      },
+          return folderId;
+        },
 
       renameSidebarFolder: (id, name) => {
         const trimmedName = name.trim();
@@ -354,6 +398,7 @@ const useStore = create<RFState>()(
 
         commitCanvases(updatedCanvases, { sidebarFolders: updatedFolders, persistedCanvas: null });
         updatedCanvases.filter((canvas) => canvas.folderId === id).forEach(persistCanvas);
+        persistWorkspaceSettings();
       },
 
       deleteSidebarFolder: (id) => {
@@ -369,6 +414,7 @@ const useStore = create<RFState>()(
 
         commitCanvases(updatedCanvases, { sidebarFolders: updatedFolders, persistedCanvas: null });
         updatedCanvases.filter((canvas) => affectedCanvasIds.includes(canvas.id)).forEach(persistCanvas);
+        persistWorkspaceSettings();
       },
 
       moveCanvasToFolder: (canvasId, folderId) => {
@@ -697,12 +743,8 @@ const useStore = create<RFState>()(
       name: 'gemini-canvas-storage',
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
-        canvases: state.canvases,
-        sidebarFolders: state.sidebarFolders,
+        workspaceId: state.workspaceId,
         currentCanvasId: state.currentCanvasId,
-        selectedProviderId: state.selectedProviderId,
-        selectedModel: state.selectedModel,
-        providerConfigs: state.providerConfigs,
       }),
     }
   )

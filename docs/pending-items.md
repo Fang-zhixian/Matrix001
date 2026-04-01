@@ -14,10 +14,10 @@
 
 ## P1
 
-- [ ] Firebase snapshot subscription lifecycle is incomplete
-  Problem: canvas snapshot subscriptions are started from auth flow, but the unsubscribe handle is not owned centrally inside the store, so repeated auth transitions may leave duplicate listeners alive.
-  Suggested direction: move listener ownership into one place, store the unsubscribe function, and clean it up on logout or re-subscribe.
-  Files: `src/firebase.ts`, `src/store.ts`, `src/App.tsx`
+- [ ] Backend session/bootstrap lifecycle still needs polish
+  Problem: the app now bootstraps through the backend, but workspace initialization, recovery, and future authenticated session handling still need a cleaner central ownership model.
+  Suggested direction: keep workspace bootstrap in one place, formalize revalidation and failure recovery, and prepare the path for real authenticated accounts.
+  Files: `src/store.ts`, `src/App.tsx`, `server/src/routes/api.ts`
 
 - [ ] Firestore sync strategy is still too chatty
   Problem: many canvas mutations save immediately, which is functional but not efficient and will become noisy under frequent edits or multiple tabs.
