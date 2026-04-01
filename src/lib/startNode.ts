@@ -20,8 +20,8 @@ export function createStartNode(canvasId: string): Node<StartNodeData> {
       y: -170,
     },
     {
-      draggable: false,
-      selectable: false,
+      draggable: true,
+      selectable: true,
       deletable: false,
     }
   );

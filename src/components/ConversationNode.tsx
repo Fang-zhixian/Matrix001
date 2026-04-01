@@ -1,13 +1,20 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import { Handle, Position, NodeProps, useReactFlow } from 'reactflow';
-import ReactMarkdown from 'react-markdown';
 import { Loader2, Bot, User, Plus, FileText, ChevronDown, BrainCircuit } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { createPortal } from 'react-dom';
-import useStore, { AttachmentPayload, ConversationNodeData } from '../store';
+import useStore from '../store';
+import type { AttachmentPayload, ConversationNodeData } from '../types/canvas';
 import { getBranchedPosition, getNodeCenter, getPendingNodeSize } from '../lib/nodeLayout';
-import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
+
+const ReactMarkdown = React.lazy(() => import('react-markdown'));
+
+const MarkdownBlock = ({ children }: { children: string }) => (
+  <Suspense fallback={<div className="whitespace-pre-wrap">{children}</div>}>
+    <ReactMarkdown>{children}</ReactMarkdown>
+  </Suspense>
+);
 
 const ConversationNode = ({ id, data, selected }: NodeProps<ConversationNodeData>) => {
   const { setCenter } = useReactFlow();
@@ -23,7 +30,17 @@ const ConversationNode = ({ id, data, selected }: NodeProps<ConversationNodeData
   const [isReasoningOpen, setIsReasoningOpen] = useState(false);
 
   useEffect(() => {
-    hljs.highlightAll();
+    let isActive = true;
+
+    void import('../lib/highlight').then(({ default: hljs }) => {
+      if (isActive) {
+        hljs.highlightAll();
+      }
+    });
+
+    return () => {
+      isActive = false;
+    };
   }, [data.messages]);
 
   useEffect(() => {
@@ -337,7 +354,7 @@ const ConversationNode = ({ id, data, selected }: NodeProps<ConversationNodeData
                   >
                     <div className="mt-3 rounded-[1rem] border border-slate-200/80 bg-slate-50/88 p-4">
                       <div className="markdown-content text-[14px] leading-7 text-slate-600 selection:bg-slate-200/70">
-                        <ReactMarkdown>{modelMsg?.reasoningContent ?? ''}</ReactMarkdown>
+                        <MarkdownBlock>{modelMsg?.reasoningContent ?? ''}</MarkdownBlock>
                       </div>
                     </div>
                   </motion.div>
@@ -349,7 +366,7 @@ const ConversationNode = ({ id, data, selected }: NodeProps<ConversationNodeData
             {modelMsg ? (
               <div className="markdown-content text-slate-700 selection:bg-teal-100">
                 {hasModelAnswer ? (
-                  <ReactMarkdown>{modelMsg.content}</ReactMarkdown>
+                  <MarkdownBlock>{modelMsg.content}</MarkdownBlock>
                 ) : data.isProcessing ? (
                   <div className="rounded-[1rem] border border-[#0071e3]/10 bg-white/72 px-4 py-3 text-sm text-slate-500">
                     Preparing final answer...

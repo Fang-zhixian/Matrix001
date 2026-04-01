@@ -1,7 +1,7 @@
 import React, { memo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { Folder, Maximize2 } from 'lucide-react';
-import { FolderNodeData } from '../store';
+import type { FolderNodeData } from '../types/canvas';
 
 const FolderNode = ({ data, id, selected }: NodeProps<FolderNodeData>) => {
   return (

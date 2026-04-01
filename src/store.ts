@@ -12,99 +12,59 @@ import {
   OnNodesChange,
   OnEdgesChange,
 } from 'reactflow';
-import { User as FirebaseUser } from 'firebase/auth';
-import { 
-  doc, 
-  setDoc, 
-  deleteDoc, 
-  collection, 
-  query, 
-  onSnapshot
-} from 'firebase/firestore';
-import { db } from './firebase';
+import type { User as FirebaseUser } from 'firebase/auth';
 import {
   getDefaultBaseUrlForProvider,
   getDefaultModelForProvider,
   type ProviderCatalogId,
 } from './lib/modelCatalog';
-import { createStartNode, type StartNodeData } from './lib/startNode';
+import { createStartNode } from './lib/startNode';
+import {
+  findCanvasById,
+  mergeSidebarFolders,
+  replaceCanvas,
+  sanitizeCanvasForFirestore,
+  shouldPersistNodeChanges,
+  updateCanvasById,
+  updateCurrentCanvas,
+} from './lib/canvasStoreUtils';
+import {
+  deleteCanvasDocument,
+  saveCanvasDocument,
+  subscribeToCanvasDocuments,
+} from './firebase';
+import type {
+  Canvas,
+  CanvasNodeData,
+  ConversationNodeData,
+  DeletedNodesSnapshot,
+  FolderNodeData,
+  PendingBranch,
+  ProviderConfig,
+  SidebarFolder,
+  SyncStatus,
+} from './types/canvas';
 
-export interface Message {
-  role: 'user' | 'model';
-  content: string;
-  reasoningContent?: string;
-  attachments?: AttachmentPayload[];
-}
-
-export interface AttachmentPayload {
-  id: string;
-  name: string;
-  mimeType: string;
-  kind: 'image' | 'document';
-  previewUrl?: string;
-  dataUrl?: string;
-  base64Data?: string;
-}
-
-export interface PendingBranch {
-  sourceNodeId: string;
-  direction: 'top' | 'bottom' | 'left' | 'right';
-  pendingNodeId: string;
-  isAutoCreated?: boolean;
-}
-
-export interface ConversationNodeData {
-  label: string;
-  messages: Message[];
-  isProcessing?: boolean;
-  isPending?: boolean;
-  globalInput?: string;
-  onSendMessage?: (nodeId: string, message: string) => void;
-}
-
-export interface FolderNodeData {
-  label: string;
-  archivedNodes: Node<ConversationNodeData>[];
-  archivedEdges: Edge[];
-  incomingConnections: { source: string, targetNodeId: string, label?: string }[];
-  outgoingConnections: { target: string, sourceNodeId: string, label?: string }[];
-  onExpand?: (nodeId: string) => void;
-}
-
-export type CanvasNodeData = ConversationNodeData | FolderNodeData | StartNodeData;
-
-export interface Canvas {
-  id: string;
-  name: string;
-  nodes: Node<CanvasNodeData>[];
-  edges: Edge[];
-  folderId?: string | null;
-  folderName?: string | null;
-  isIncognito?: boolean;
-  createdAt: number;
-  lastModified: number;
-  ownerId?: string;
-}
-
-export interface SidebarFolder {
-  id: string;
-  name: string;
-  createdAt: number;
-  lastModified: number;
-}
-
-export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
-
-export interface ProviderConfig {
-  apiKey: string;
-  baseUrl: string;
-}
+export type {
+  AttachmentPayload,
+  Canvas,
+  CanvasNodeData,
+  ConversationNodeData,
+  FolderNodeData,
+  Message,
+  PendingBranch,
+  ProviderConfig,
+  SidebarFolder,
+  SyncStatus,
+  DeletedNodesSnapshot,
+} from './types/canvas';
 
 export type RFState = {
   canvases: Canvas[];
   sidebarFolders: SidebarFolder[];
   currentCanvasId: string | null;
   pendingBranch: PendingBranch | null;
+  deletedNodesSnapshot: DeletedNodesSnapshot | null;
   selectedProviderId: ProviderCatalogId;
   selectedModel: string;
   providerConfigs: Record<ProviderCatalogId, ProviderConfig>;
@@ -138,7 +98,11 @@ export type RFState = {
   setEdges: (edges: Edge[] | ((edges: Edge[]) => Edge[])) => void;
   addNode: (node: Node<CanvasNodeData>) => void;
   updateNodeData: (nodeId: string, data: Partial<CanvasNodeData>) => void;
+  updateNodeDataForCanvas: (canvasId: string, nodeId: string, data: Partial<CanvasNodeData>) => void;
   deleteNode: (nodeId: string) => void;
+  deleteNodes: (nodeIds: string[]) => void;
+  undoDelete: () => void;
+  restoreDeletedSnapshot: (snapshot: DeletedNodesSnapshot) => void;
   setPendingBranch: (branch: PendingBranch | null) => void;
   archiveNodes: (nodeIds: string[]) => void;
   unarchiveNode: (folderNodeId: string) => void;
@@ -150,11 +114,56 @@ export type RFState = {
 
 const useStore = create<RFState>()(
   persist(
-    (set, get) => ({
+    (set, get) => {
+      const persistCanvas = (canvas: Canvas | null | undefined) => {
+        const { user } = get();
+        if (user && canvas) {
+          get().saveCanvasToFirestore(canvas);
+        }
+      };
+
+      const commitCanvases = (
+        canvases: Canvas[],
+        options?: {
+          currentCanvasId?: string | null;
+          pendingBranch?: PendingBranch | null;
+          persistedCanvas?: Canvas | null;
+          sidebarFolders?: SidebarFolder[];
+        }
+      ) => {
+        set({
+          canvases,
+          ...(options?.currentCanvasId !== undefined ? { currentCanvasId: options.currentCanvasId } : {}),
+          ...(options?.pendingBranch !== undefined ? { pendingBranch: options.pendingBranch } : {}),
+          ...(options?.sidebarFolders ? { sidebarFolders: options.sidebarFolders } : {}),
+        });
+
+        persistCanvas(options?.persistedCanvas);
+      };
+
+      const commitCanvasUpdate = (
+        updatedCanvas: Canvas,
+        options?: {
+          currentCanvasId?: string | null;
+          pendingBranch?: PendingBranch | null;
+          sidebarFolders?: SidebarFolder[];
+          shouldPersist?: boolean;
+        }
+      ) => {
+        commitCanvases(replaceCanvas(get().canvases, updatedCanvas), {
+          currentCanvasId: options?.currentCanvasId,
+          pendingBranch: options?.pendingBranch,
+          sidebarFolders: options?.sidebarFolders,
+          persistedCanvas: options?.shouldPersist === false ? null : updatedCanvas,
+        });
+      };
+
+      return {
       canvases: [],
       sidebarFolders: [],
       currentCanvasId: null,
       pendingBranch: null,
+      deletedNodesSnapshot: null,
       selectedProviderId: 'gemini',
       selectedModel: getDefaultModelForProvider('gemini'),
       providerConfigs: {
@@ -221,54 +230,8 @@ const useStore = create<RFState>()(
 
         set({ syncStatus: 'syncing' });
         try {
-          const canvasRef = doc(db, 'users', user.uid, 'canvases', canvas.id);
-          
-          // Deep clone and sanitize to remove functions, DOM elements, and circular references
-          const sanitizeData = (obj: any, seen = new WeakSet()): any => {
-            if (obj === null || typeof obj !== 'object') {
-              // Keep primitives, but remove functions
-              return typeof obj === 'function' ? undefined : obj;
-            }
-            
-            if (obj instanceof HTMLElement || (obj.constructor && obj.constructor.name === 'HTMLElement')) {
-              return undefined; // Strip DOM elements
-            }
-
-            if (seen.has(obj)) {
-              return undefined; // Break circular references
-            }
-            seen.add(obj);
-
-            if (Array.isArray(obj)) {
-              return obj.map(item => sanitizeData(item, seen)).filter(item => item !== undefined);
-            }
-
-            const result: any = {};
-            for (const key in obj) {
-              if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                // Explicitly skip known function properties just in case
-                if (key === 'onSendMessage' || key === 'onExpand') continue;
-                
-                const value = sanitizeData(obj[key], seen);
-                if (value !== undefined) {
-                  result[key] = value;
-                }
-              }
-            }
-            return result;
-          };
-
-          const sanitizedCanvas = sanitizeData({
-            id: canvas.id,
-            name: canvas.name,
-            createdAt: canvas.createdAt,
-            lastModified: Date.now(),
-            nodes: canvas.nodes,
-            edges: canvas.edges,
-            ownerId: user.uid,
-          });
-
-          await setDoc(canvasRef, sanitizedCanvas);
+          const sanitizedCanvas = sanitizeCanvasForFirestore(canvas, user.uid);
+          await saveCanvasDocument(user.uid, canvas.id, sanitizedCanvas);
           set({ syncStatus: 'synced' });
         } catch (error) {
           console.error('Error saving canvas to Firestore:', error);
@@ -280,52 +243,30 @@ const useStore = create<RFState>()(
         const { user } = get();
         if (!user) return;
 
-        const canvasesRef = collection(db, 'users', user.uid, 'canvases');
-        const q = query(canvasesRef);
+        void subscribeToCanvasDocuments(
+          user.uid,
+          (remoteCanvases) => {
+            if (remoteCanvases.length > 0) {
+              const sortedCanvases = remoteCanvases.sort((a, b) => b.lastModified - a.lastModified);
 
-        return onSnapshot(q, (snapshot) => {
-          const remoteCanvases: Canvas[] = [];
-          snapshot.forEach((doc) => {
-            remoteCanvases.push(doc.data() as Canvas);
-          });
-
-          if (remoteCanvases.length > 0) {
-            const sortedCanvases = remoteCanvases.sort((a, b) => b.lastModified - a.lastModified);
-            const remoteFolders = Array.from(
-              new Map(
-                sortedCanvases
-                  .filter((canvas) => canvas.folderId && canvas.folderName)
-                  .map((canvas) => [
-                    canvas.folderId!,
-                    {
-                      id: canvas.folderId!,
-                      name: canvas.folderName!,
-                      createdAt: canvas.createdAt,
-                      lastModified: canvas.lastModified,
-                    } satisfies SidebarFolder,
-                  ])
-              ).values()
-            );
-
-            set({ 
-              canvases: sortedCanvases,
-              sidebarFolders: Array.from(
-                new Map(
-                  [...get().sidebarFolders, ...remoteFolders].map((folder) => [folder.id, folder])
-                ).values()
-              ).sort((a, b) => b.lastModified - a.lastModified),
-              currentCanvasId: get().currentCanvasId || sortedCanvases[0].id
-            });
+              set({
+                canvases: sortedCanvases,
+                sidebarFolders: mergeSidebarFolders(get().sidebarFolders, sortedCanvases),
+                currentCanvasId: get().currentCanvasId || sortedCanvases[0].id,
+              });
+            }
+          },
+          (error) => {
+            console.error('Firestore onSnapshot error:', error);
+            set({ syncStatus: 'error' });
           }
-        }, (error) => {
-          console.error('Firestore onSnapshot error:', error);
-          set({ syncStatus: 'error' });
-        });
+        );
       },
 
       addCanvas: (options) => {
         const id = `canvas_${Date.now()}`;
         const isIncognito = Boolean(options?.incognito);
+        const timestamp = Date.now();
         const newCanvas: Canvas = {
           id,
           name: isIncognito ? 'Private Chat' : `Untitled Canvas ${get().canvases.length + 1}`,
@@ -334,21 +275,15 @@ const useStore = create<RFState>()(
           folderId: null,
           folderName: null,
           isIncognito,
-          createdAt: Date.now(),
-          lastModified: Date.now(),
+          createdAt: timestamp,
+          lastModified: timestamp,
         };
-        
-        const updatedCanvases = [newCanvas, ...get().canvases];
-        set({
-          canvases: updatedCanvases,
+
+        commitCanvases([newCanvas, ...get().canvases], {
           currentCanvasId: id,
           pendingBranch: null,
         });
-
-        const { user } = get();
-        if (user) {
-          get().saveCanvasToFirestore(newCanvas);
-        }
+        persistCanvas(newCanvas);
       },
 
       deleteCanvas: async (id) => {
@@ -361,12 +296,13 @@ const useStore = create<RFState>()(
           canvases: newCanvases,
           currentCanvasId: nextCanvasId,
           pendingBranch: null,
+          deletedNodesSnapshot: get().deletedNodesSnapshot?.canvasId === id ? null : get().deletedNodesSnapshot,
         });
 
         const { user } = get();
         if (user) {
           try {
-            await deleteDoc(doc(db, 'users', user.uid, 'canvases', id));
+            await deleteCanvasDocument(user.uid, id);
           } catch (error) {
             console.error('Error deleting canvas from Firestore:', error);
           }
@@ -374,16 +310,14 @@ const useStore = create<RFState>()(
       },
 
       updateCanvasName: (id, name) => {
-        const updatedCanvases = get().canvases.map((c) =>
-          c.id === id ? { ...c, name, lastModified: Date.now() } : c
-        );
-        set({ canvases: updatedCanvases });
+        const result = updateCanvasById(get().canvases, id, (canvas) => ({
+          ...canvas,
+          name,
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const { user } = get();
-        if (user) {
-          const updatedCanvas = updatedCanvases.find(c => c.id === id);
-          if (updatedCanvas) get().saveCanvasToFirestore(updatedCanvas);
-        }
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       createSidebarFolder: (name) => {
@@ -418,19 +352,8 @@ const useStore = create<RFState>()(
             : canvas
         );
 
-        set({
-          sidebarFolders: updatedFolders,
-          canvases: updatedCanvases,
-        });
-
-        const { user } = get();
-        if (user) {
-          updatedCanvases
-            .filter((canvas) => canvas.folderId === id)
-            .forEach((canvas) => {
-              get().saveCanvasToFirestore(canvas);
-            });
-        }
+        commitCanvases(updatedCanvases, { sidebarFolders: updatedFolders, persistedCanvas: null });
+        updatedCanvases.filter((canvas) => canvas.folderId === id).forEach(persistCanvas);
       },
 
       deleteSidebarFolder: (id) => {
@@ -444,23 +367,12 @@ const useStore = create<RFState>()(
             : canvas
         );
 
-        set({
-          sidebarFolders: updatedFolders,
-          canvases: updatedCanvases,
-        });
-
-        const { user } = get();
-        if (user) {
-          updatedCanvases
-            .filter((canvas) => affectedCanvasIds.includes(canvas.id))
-            .forEach((canvas) => {
-              get().saveCanvasToFirestore(canvas);
-            });
-        }
+        commitCanvases(updatedCanvases, { sidebarFolders: updatedFolders, persistedCanvas: null });
+        updatedCanvases.filter((canvas) => affectedCanvasIds.includes(canvas.id)).forEach(persistCanvas);
       },
 
       moveCanvasToFolder: (canvasId, folderId) => {
-        const targetCanvas = get().canvases.find((canvas) => canvas.id === canvasId);
+        const targetCanvas = findCanvasById(get().canvases, canvasId);
         if (!targetCanvas) return;
 
         const targetFolder = folderId
@@ -475,358 +387,312 @@ const useStore = create<RFState>()(
               : null)
           : null;
 
-        const updatedCanvases = get().canvases.map((canvas) =>
-          canvas.id === canvasId
-            ? {
-                ...canvas,
-                folderId: targetFolder?.id ?? null,
-                folderName: targetFolder?.name ?? null,
-                lastModified: Date.now(),
-              }
-            : canvas
-        );
+        const result = updateCanvasById(get().canvases, canvasId, (canvas) => ({
+          ...canvas,
+          folderId: targetFolder?.id ?? null,
+          folderName: targetFolder?.name ?? null,
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        set({
-          canvases: updatedCanvases,
-        });
-
-        const { user } = get();
-        if (user) {
-          const updatedCanvas = updatedCanvases.find((canvas) => canvas.id === canvasId);
-          if (updatedCanvas) get().saveCanvasToFirestore(updatedCanvas);
-        }
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       onNodesChange: (changes: NodeChange[]) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          nodes: applyNodeChanges(changes, canvas.nodes),
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedNodes = applyNodeChanges(changes, currentCanvas.nodes);
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, lastModified: Date.now() };
-        
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        // Only save to firestore if the change is NOT a continuous drag
-        // We check if it's a position change that is NOT dragging
-        const shouldSave = changes.some(c => {
-          if (c.type === 'position') {
-            return c.dragging === false || c.dragging === undefined; // Only save when drag stops or programmatic
-          }
-          if (c.type === 'dimensions' || c.type === 'remove' || c.type === 'add') {
-            return true;
-          }
-          return false;
-        });
-
-        if (user && shouldSave) {
-           get().saveCanvasToFirestore(updatedCanvas);
-        }
+        commitCanvasUpdate(result.updatedCanvas, { shouldPersist: shouldPersistNodeChanges(changes) });
       },
 
       onEdgesChange: (changes: EdgeChange[]) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          edges: applyEdgeChanges(changes, canvas.edges),
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedEdges = applyEdgeChanges(changes, currentCanvas.edges);
-        const updatedCanvas = { ...currentCanvas, edges: updatedEdges, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       onConnect: (connection: Connection) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          edges: addEdge(connection, canvas.edges),
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedEdges = addEdge(connection, currentCanvas.edges);
-        const updatedCanvas = { ...currentCanvas, edges: updatedEdges, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       setNodes: (nodesOrUpdater) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          nodes: typeof nodesOrUpdater === 'function' ? nodesOrUpdater(canvas.nodes) : nodesOrUpdater,
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedNodes = typeof nodesOrUpdater === 'function' 
-          ? nodesOrUpdater(currentCanvas.nodes) 
-          : nodesOrUpdater;
-
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       setEdges: (edgesOrUpdater) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          edges: typeof edgesOrUpdater === 'function' ? edgesOrUpdater(canvas.edges) : edgesOrUpdater,
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedEdges = typeof edgesOrUpdater === 'function' 
-          ? edgesOrUpdater(currentCanvas.edges) 
-          : edgesOrUpdater;
-
-        const updatedCanvas = { ...currentCanvas, edges: updatedEdges, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       addNode: (node) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => ({
+          ...canvas,
+          nodes: [...canvas.nodes, node],
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const updatedCanvas = { ...currentCanvas, nodes: [...currentCanvas.nodes, node], lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       updateNodeData: (nodeId, data) => {
         const { currentCanvasId, canvases } = get();
         if (!currentCanvasId) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
+        get().updateNodeDataForCanvas(currentCanvasId, nodeId, data);
+      },
 
-        const updatedNodes = currentCanvas.nodes.map((node) => {
-          if (node.id === nodeId) {
-            return { ...node, data: { ...node.data, ...data } };
-          }
-          return node;
-        });
-
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
+      updateNodeDataForCanvas: (canvasId, nodeId, data) => {
+        const result = updateCanvasById(get().canvases, canvasId, (canvas) => ({
+          ...canvas,
+          nodes: canvas.nodes.map((node) =>
+            node.id === nodeId ? { ...node, data: { ...node.data, ...data } } : node
           ),
-        });
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
 
-        const { user } = get();
-        // Only sync if not just a processing state change to avoid excessive writes
-        if (user && !('isProcessing' in data)) {
-          get().saveCanvasToFirestore(updatedCanvas);
+        const shouldSync =
+          !('isProcessing' in data) ||
+          (typeof data.isProcessing === 'boolean' && data.isProcessing === false);
+
+        if (shouldSync) {
+          commitCanvasUpdate(result.updatedCanvas);
+          return;
         }
+
+        commitCanvasUpdate(result.updatedCanvas, { shouldPersist: false });
       },
 
       deleteNode: (nodeId) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        get().deleteNodes([nodeId]);
+      },
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
+      deleteNodes: (nodeIds) => {
+        if (nodeIds.length === 0) return;
 
-        const updatedNodes = currentCanvas.nodes.filter((node) => node.id !== nodeId);
-        const updatedEdges = currentCanvas.edges.filter(
-          (edge) => edge.source !== nodeId && edge.target !== nodeId
+        const uniqueNodeIds = Array.from(new Set(nodeIds));
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (canvas) => {
+          const deletedNodes = canvas.nodes.filter((node) => uniqueNodeIds.includes(node.id));
+          if (deletedNodes.length === 0) {
+            return canvas;
+          }
+
+          const deletedEdges = canvas.edges.filter(
+            (edge) => uniqueNodeIds.includes(edge.source) || uniqueNodeIds.includes(edge.target)
+          );
+
+          return {
+            ...canvas,
+            nodes: canvas.nodes.filter((node) => !uniqueNodeIds.includes(node.id)),
+            edges: canvas.edges.filter(
+              (edge) => !uniqueNodeIds.includes(edge.source) && !uniqueNodeIds.includes(edge.target)
+            ),
+            lastModified: Date.now(),
+          };
+        });
+        if (!result) return;
+        if (result.updatedCanvas === result.currentCanvas) return;
+
+        const deletedNodes = result.currentCanvas.nodes.filter((node) => uniqueNodeIds.includes(node.id));
+        const deletedEdges = result.currentCanvas.edges.filter(
+          (edge) => uniqueNodeIds.includes(edge.source) || uniqueNodeIds.includes(edge.target)
         );
 
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, edges: updatedEdges, lastModified: Date.now() };
+        set({ deletedNodesSnapshot: {
+          canvasId: result.currentCanvas.id,
+          nodes: deletedNodes,
+          edges: deletedEdges,
+        }});
 
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
+        commitCanvasUpdate(result.updatedCanvas);
+      },
 
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+      undoDelete: () => {
+        const snapshot = get().deletedNodesSnapshot;
+        if (!snapshot) return;
+
+        get().restoreDeletedSnapshot(snapshot);
+        set({ deletedNodesSnapshot: null });
+      },
+
+      restoreDeletedSnapshot: (snapshot) => {
+        const result = updateCanvasById(get().canvases, snapshot.canvasId, (canvas) => ({
+          ...canvas,
+          nodes: [
+            ...canvas.nodes,
+            ...snapshot.nodes.filter(
+              (restoredNode) => !canvas.nodes.some((existingNode) => existingNode.id === restoredNode.id)
+            ),
+          ],
+          edges: [
+            ...canvas.edges,
+            ...snapshot.edges.filter(
+              (restoredEdge) => !canvas.edges.some((existingEdge) => existingEdge.id === restoredEdge.id)
+            ),
+          ],
+          lastModified: Date.now(),
+        }));
+        if (!result) return;
+
+        commitCanvasUpdate(result.updatedCanvas, { currentCanvasId: snapshot.canvasId });
       },
 
       archiveNodes: (nodeIds) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId || nodeIds.length === 0) return;
+        if (nodeIds.length === 0) return;
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
-
-        const nodesToArchive = currentCanvas.nodes.filter(n => nodeIds.includes(n.id)) as Node<ConversationNodeData>[];
-        if (nodesToArchive.length === 0) return;
-
-        // Calculate average position
-        const avgX = nodesToArchive.reduce((sum, n) => sum + n.position.x, 0) / nodesToArchive.length;
-        const avgY = nodesToArchive.reduce((sum, n) => sum + n.position.y, 0) / nodesToArchive.length;
-
-        const internalEdges = currentCanvas.edges.filter(e => nodeIds.includes(e.source) && nodeIds.includes(e.target));
-        const incomingEdges = currentCanvas.edges.filter(e => !nodeIds.includes(e.source) && nodeIds.includes(e.target));
-        const outgoingEdges = currentCanvas.edges.filter(e => nodeIds.includes(e.source) && !nodeIds.includes(e.target));
-
-        const folderId = `folder_${Date.now()}`;
-        
-        const incomingConnections = incomingEdges.map(e => ({ source: e.source, targetNodeId: e.target, label: e.label as string }));
-        const outgoingConnections = outgoingEdges.map(e => ({ target: e.target, sourceNodeId: e.source, label: e.label as string }));
-
-        const folderNode: Node<FolderNodeData> = {
-          id: folderId,
-          type: 'folder',
-          position: { x: avgX, y: avgY },
-          data: {
-            label: `Archived Group (${nodesToArchive.length})`,
-            archivedNodes: nodesToArchive,
-            archivedEdges: internalEdges,
-            incomingConnections,
-            outgoingConnections,
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (currentCanvas) => {
+          const nodesToArchive = currentCanvas.nodes.filter((node) => nodeIds.includes(node.id)) as Node<ConversationNodeData>[];
+          if (nodesToArchive.length === 0) {
+            return currentCanvas;
           }
-        };
 
-        // Create new edges for the folder
-        const newEdges: Edge[] = [];
-        
-        // Map incoming edges to the folder (unique sources)
-        const uniqueSources = Array.from(new Set(incomingEdges.map(e => e.source)));
-        uniqueSources.forEach(source => {
-          newEdges.push({
-            id: `edge_${source}_${folderId}`,
-            source: source,
-            target: folderId,
-            label: 'to folder'
-          });
+          const avgX = nodesToArchive.reduce((sum, node) => sum + node.position.x, 0) / nodesToArchive.length;
+          const avgY = nodesToArchive.reduce((sum, node) => sum + node.position.y, 0) / nodesToArchive.length;
+
+          const internalEdges = currentCanvas.edges.filter(
+            (edge) => nodeIds.includes(edge.source) && nodeIds.includes(edge.target)
+          );
+          const incomingEdges = currentCanvas.edges.filter(
+            (edge) => !nodeIds.includes(edge.source) && nodeIds.includes(edge.target)
+          );
+          const outgoingEdges = currentCanvas.edges.filter(
+            (edge) => nodeIds.includes(edge.source) && !nodeIds.includes(edge.target)
+          );
+
+          const folderId = `folder_${Date.now()}`;
+          const incomingConnections = incomingEdges.map((edge) => ({
+            source: edge.source,
+            targetNodeId: edge.target,
+            label: edge.label as string,
+          }));
+          const outgoingConnections = outgoingEdges.map((edge) => ({
+            target: edge.target,
+            sourceNodeId: edge.source,
+            label: edge.label as string,
+          }));
+
+          const folderNode: Node<FolderNodeData> = {
+            id: folderId,
+            type: 'folder',
+            position: { x: avgX, y: avgY },
+            data: {
+              label: `Archived Group (${nodesToArchive.length})`,
+              archivedNodes: nodesToArchive,
+              archivedEdges: internalEdges,
+              incomingConnections,
+              outgoingConnections,
+            },
+          };
+
+          const newEdges: Edge[] = [
+            ...Array.from(new Set(incomingEdges.map((edge) => edge.source))).map((source) => ({
+              id: `edge_${source}_${folderId}`,
+              source,
+              target: folderId,
+              label: 'to folder',
+            })),
+            ...Array.from(new Set(outgoingEdges.map((edge) => edge.target))).map((target) => ({
+              id: `edge_${folderId}_${target}`,
+              source: folderId,
+              target,
+              label: 'from folder',
+            })),
+          ];
+
+          return {
+            ...currentCanvas,
+            nodes: [...currentCanvas.nodes.filter((node) => !nodeIds.includes(node.id)), folderNode],
+            edges: [
+              ...currentCanvas.edges.filter(
+                (edge) => !nodeIds.includes(edge.source) && !nodeIds.includes(edge.target)
+              ),
+              ...newEdges,
+            ],
+            lastModified: Date.now(),
+          };
         });
+        if (!result) return;
+        if (result.updatedCanvas === result.currentCanvas) return;
 
-        // Map outgoing edges from the folder (unique targets)
-        const uniqueTargets = Array.from(new Set(outgoingEdges.map(e => e.target)));
-        uniqueTargets.forEach(target => {
-          newEdges.push({
-            id: `edge_${folderId}_${target}`,
-            source: folderId,
-            target: target,
-            label: 'from folder'
-          });
-        });
-
-        const updatedNodes = [
-          ...currentCanvas.nodes.filter(n => !nodeIds.includes(n.id)),
-          folderNode
-        ];
-
-        const updatedEdges = [
-          ...currentCanvas.edges.filter(e => !nodeIds.includes(e.source) && !nodeIds.includes(e.target)),
-          ...newEdges
-        ];
-
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, edges: updatedEdges, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
-        });
-
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       unarchiveNode: (folderNodeId) => {
-        const { currentCanvasId, canvases } = get();
-        if (!currentCanvasId) return;
+        const result = updateCurrentCanvas(get().canvases, get().currentCanvasId, (currentCanvas) => {
+          const folderNode = currentCanvas.nodes.find((node) => node.id === folderNodeId) as Node<FolderNodeData>;
+          if (!folderNode || folderNode.type !== 'folder') {
+            return currentCanvas;
+          }
 
-        const currentCanvas = canvases.find((c) => c.id === currentCanvasId);
-        if (!currentCanvas) return;
+          const { archivedNodes, archivedEdges, incomingConnections, outgoingConnections } = folderNode.data;
+          const restoredIncoming = incomingConnections.map((connection) => ({
+            id: `edge_${connection.source}_${connection.targetNodeId}`,
+            source: connection.source,
+            target: connection.targetNodeId,
+            label: connection.label,
+          }));
+          const restoredOutgoing = outgoingConnections.map((connection) => ({
+            id: `edge_${connection.sourceNodeId}_${connection.target}`,
+            source: connection.sourceNodeId,
+            target: connection.target,
+            label: connection.label,
+          }));
 
-        const folderNode = currentCanvas.nodes.find(n => n.id === folderNodeId) as Node<FolderNodeData>;
-        if (!folderNode || folderNode.type !== 'folder') return;
-
-        const { archivedNodes, archivedEdges, incomingConnections, outgoingConnections } = folderNode.data;
-
-        // Restore original edges
-        const restoredIncoming = incomingConnections.map(conn => ({
-          id: `edge_${conn.source}_${conn.targetNodeId}`,
-          source: conn.source,
-          target: conn.targetNodeId,
-          label: conn.label
-        }));
-
-        const restoredOutgoing = outgoingConnections.map(conn => ({
-          id: `edge_${conn.sourceNodeId}_${conn.target}`,
-          source: conn.sourceNodeId,
-          target: conn.target,
-          label: conn.label
-        }));
-
-        const updatedNodes = [
-          ...currentCanvas.nodes.filter(n => n.id !== folderNodeId),
-          ...archivedNodes
-        ];
-
-        const updatedEdges = [
-          ...currentCanvas.edges.filter(e => e.source !== folderNodeId && e.target !== folderNodeId),
-          ...archivedEdges,
-          ...restoredIncoming,
-          ...restoredOutgoing
-        ];
-
-        const updatedCanvas = { ...currentCanvas, nodes: updatedNodes, edges: updatedEdges, lastModified: Date.now() };
-
-        set({
-          canvases: canvases.map((c) =>
-            c.id === currentCanvasId ? updatedCanvas : c
-          ),
+          return {
+            ...currentCanvas,
+            nodes: [...currentCanvas.nodes.filter((node) => node.id !== folderNodeId), ...archivedNodes],
+            edges: [
+              ...currentCanvas.edges.filter(
+                (edge) => edge.source !== folderNodeId && edge.target !== folderNodeId
+              ),
+              ...archivedEdges,
+              ...restoredIncoming,
+              ...restoredOutgoing,
+            ],
+            lastModified: Date.now(),
+          };
         });
+        if (!result) return;
+        if (result.updatedCanvas === result.currentCanvas) return;
 
-        const { user } = get();
-        if (user) get().saveCanvasToFirestore(updatedCanvas);
+        commitCanvasUpdate(result.updatedCanvas);
       },
 
       setPendingBranch: (branch) => {
         set({ pendingBranch: branch });
       },
-    }),
+    };
+    },
     {
       name: 'gemini-canvas-storage',
       storage: createJSONStorage(() => localStorage),

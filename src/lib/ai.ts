@@ -1,5 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
-
 export type AIProtocol = 'gemini' | 'openai-compatible';
 
 export interface AIMessage {
@@ -93,6 +91,7 @@ async function* streamGeminiTextInternal({ model, messages, systemInstruction, a
     throw new Error('Missing GEMINI_API_KEY.');
   }
 
+  const { GoogleGenAI } = await import('@google/genai');
   const geminiClient = new GoogleGenAI({ apiKey });
 
   const contents = messages

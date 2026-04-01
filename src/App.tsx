@@ -1,28 +1,25 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactFlow, {
-  Background,
-  Controls,
-  MiniMap,
-  ReactFlowProvider,
-  useReactFlow,
-  SelectionMode,
-} from 'reactflow';
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactFlowProvider, useReactFlow } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Send, Loader2, Sparkles, Lock, ChevronDown, Check, Paperclip, FileText, Image as ImageIcon, X, Plus, Hand, ScanSearch } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
-import useStore, { Message, FolderNodeData, ConversationNodeData, AttachmentPayload } from './store';
+import { motion } from 'motion/react';
+import { Undo2 } from 'lucide-react';
+import useStore from './store';
+import type { AttachmentPayload, ConversationNodeData, DeletedNodesSnapshot, FolderNodeData, Message } from './types/canvas';
+import type { AIMessage } from './lib/ai';
+import CanvasViewport, { type CanvasInteractionMode } from './components/CanvasViewport';
+import ChatComposer from './components/ChatComposer';
 import ConversationNode from './components/ConversationNode';
 import FolderNode from './components/FolderNode';
 import StartNode from './components/StartNode';
 import Sidebar from './components/Sidebar';
 import ContextMenu from './components/ContextMenu';
-import ModelSettingsPanel from './components/ModelSettingsPanel';
-import ProviderMark from './components/ProviderMark';
-import { auth, db } from './firebase';
-import { streamText, type AIMessage } from './lib/ai';
+import { mergeUserProfile, subscribeToAuthChanges } from './firebase';
 import { getProviderCatalogEntry, PROVIDER_CATALOG } from './lib/modelCatalog';
+import {
+  inferMimeType,
+  readFileAsDataUrl,
+  stripAttachmentPayload,
+} from './lib/attachmentUtils';
 import { createStandaloneStartNode, createStartNode, isRootStartNode } from './lib/startNode';
 import {
   CONVERSATION_NODE_HEIGHT,
@@ -40,32 +37,7 @@ const nodeTypes = {
   start: StartNode,
 };
 
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file.'));
-    reader.readAsDataURL(file);
-  });
-}
-
-function inferMimeType(filename: string) {
-  if (filename.toLowerCase().endsWith('.pdf')) return 'application/pdf';
-  if (filename.toLowerCase().endsWith('.png')) return 'image/png';
-  if (filename.toLowerCase().endsWith('.jpg') || filename.toLowerCase().endsWith('.jpeg')) return 'image/jpeg';
-  if (filename.toLowerCase().endsWith('.webp')) return 'image/webp';
-  return 'application/octet-stream';
-}
-
-function stripAttachmentPayload(attachment: AttachmentPayload): AttachmentPayload {
-  return {
-    id: attachment.id,
-    name: attachment.name,
-    mimeType: attachment.mimeType,
-    kind: attachment.kind,
-    previewUrl: attachment.previewUrl,
-  };
-}
+const ModelSettingsPanel = React.lazy(() => import('./components/ModelSettingsPanel'));
 
 const Canvas = () => {
   const { 
@@ -79,7 +51,7 @@ const Canvas = () => {
     onNodesChange,
     onEdgesChange,
     onConnect,
-    updateNodeData,
+    updateNodeDataForCanvas,
     setNodes,
     setEdges,
     setUser,
@@ -93,38 +65,44 @@ const Canvas = () => {
     loadCanvasesFromFirestore,
     archiveNodes,
     unarchiveNode,
-    deleteNode
+    deleteNode,
+    deleteNodes,
+    deletedNodesSnapshot,
+    undoDelete,
+    restoreDeletedSnapshot,
   } = useStore();
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; isFolder: boolean; isPane: boolean; nodeId: string | null } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
-  const composerMenuRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [undoSnapshot, setUndoSnapshot] = useState<DeletedNodesSnapshot | null>(null);
 
   // Firebase Auth Listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    let isActive = true;
+    let unsubscribe: (() => void) | undefined;
+
+    void subscribeToAuthChanges(async (user) => {
+      if (!isActive) return;
+
       setUser(user);
       setAuthReady(true);
-      
-      if (user) {
-        // Sync user profile to Firestore
-        const userRef = doc(db, 'users', user.uid);
-        await setDoc(userRef, {
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          lastLogin: Date.now()
-        }, { merge: true });
 
-        // Load canvases from Firestore
+      if (user) {
+        await mergeUserProfile(user);
         loadCanvasesFromFirestore();
+      }
+    }).then((nextUnsubscribe) => {
+      if (isActive) {
+        unsubscribe = nextUnsubscribe;
+      } else {
+        nextUnsubscribe();
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      isActive = false;
+      unsubscribe?.();
+    };
   }, [setUser, setAuthReady, loadCanvasesFromFirestore]);
 
   const currentCanvas = useMemo(() => 
@@ -141,10 +119,8 @@ const Canvas = () => {
   const { fitView, setCenter, project } = useReactFlow();
   const [globalInput, setGlobalInput] = useState('');
   const [composerAttachments, setComposerAttachments] = useState<AttachmentPayload[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
-  const [previewAttachment, setPreviewAttachment] = useState<AttachmentPayload | null>(null);
-  const [canvasInteractionMode, setCanvasInteractionMode] = useState<'drag' | 'select'>('drag');
+  const [canvasInteractionMode, setCanvasInteractionMode] = useState<CanvasInteractionMode>('drag');
   const selectedProvider = getProviderCatalogEntry(selectedProviderId);
   const selectedProviderConfig = providerConfigs[selectedProviderId];
   const selectedModelOption = selectedProvider.models.find((model) => model.id === selectedModel) ?? selectedProvider.models[0];
@@ -165,17 +141,6 @@ const Canvas = () => {
   const isProviderConfigured = selectedProvider.protocol === 'gemini'
     ? Boolean(selectedProviderConfig.apiKey.trim())
     : Boolean(selectedProviderConfig.apiKey.trim() && selectedProviderConfig.baseUrl.trim());
-
-  useEffect(() => {
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!composerMenuRef.current?.contains(event.target as Node)) {
-        setIsModelMenuOpen(false);
-      }
-    };
-
-    window.addEventListener('pointerdown', handlePointerDown);
-    return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, []);
 
   // Ensure at least one canvas exists
   useEffect(() => {
@@ -254,34 +219,64 @@ const Canvas = () => {
     return context;
   }, [nodes, edges]);
 
-  const handleSendMessage = useCallback(async (nodeId: string, text: string) => {
-    const node = nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'conversation') return;
+  const getAnchorNode = useCallback(
+    () =>
+      nodes.find((node) => node.selected && (node.type === 'conversation' || node.type === 'start')) ||
+      [...nodes].reverse().find((node) => node.type === 'conversation') ||
+      rootStartNode,
+    [nodes, rootStartNode]
+  );
 
-    const data = node.data as ConversationNodeData;
-    const userMessage: Message = { role: 'user', content: text };
-    const updatedMessages = [...data.messages, userMessage];
+  const buildModelMessage = useCallback(
+    (content: string, reasoningContent = ''): Message => ({
+      role: 'model',
+      content,
+      reasoningContent: reasoningContent || undefined,
+    }),
+    []
+  );
 
-    updateNodeData(nodeId, {
-      messages: updatedMessages,
+  const streamResponseToNode = useCallback(async ({
+    canvasId,
+    nodeId,
+    requestMessages,
+    messagesBeforeModel,
+    focusPosition,
+    errorFallback,
+    systemInstruction,
+  }: {
+    canvasId: string;
+    nodeId: string;
+    requestMessages: AIMessage[];
+    messagesBeforeModel: Message[];
+    focusPosition?: { x: number; y: number };
+    errorFallback: string;
+    systemInstruction?: string;
+  }) => {
+    const { streamText } = await import('./lib/ai');
+    let fullText = '';
+    let fullReasoningText = '';
+
+    updateNodeDataForCanvas(canvasId, nodeId, {
+      messages: [...messagesBeforeModel, buildModelMessage('')],
       isProcessing: true,
     });
 
-    try {
-      let fullText = '';
-      let fullReasoningText = '';
+    if (focusPosition) {
+      setTimeout(() => {
+        const center = getNodeCenter(focusPosition, getConversationNodeSize());
+        setCenter(center.x, center.y, { zoom: 1, duration: 800 });
+      }, 100);
+    }
 
+    try {
       for await (const chunk of streamText({
         protocol: selectedProvider.protocol,
         model: selectedModel,
         apiKey: selectedProviderConfig.apiKey.trim(),
         baseUrl: selectedProviderConfig.baseUrl.trim(),
-        systemInstruction: 'You are a helpful assistant. Keep responses concise but informative.',
-        messages: updatedMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          attachments: message.attachments,
-        })),
+        messages: requestMessages,
+        systemInstruction,
       })) {
         if (chunk.type === 'reasoning') {
           fullReasoningText += chunk.text;
@@ -289,24 +284,68 @@ const Canvas = () => {
           fullText += chunk.text;
         }
 
-        updateNodeData(nodeId, {
-          messages: [...updatedMessages, { role: 'model', content: fullText, reasoningContent: fullReasoningText || undefined }],
+        updateNodeDataForCanvas(canvasId, nodeId, {
+          messages: [...messagesBeforeModel, buildModelMessage(fullText, fullReasoningText)],
           isProcessing: true,
         });
       }
-      
-      updateNodeData(nodeId, {
-        messages: [...updatedMessages, { role: 'model', content: fullText || 'No response', reasoningContent: fullReasoningText || undefined }],
+
+      updateNodeDataForCanvas(canvasId, nodeId, {
+        messages: [...messagesBeforeModel, buildModelMessage(fullText || 'No response', fullReasoningText)],
         isProcessing: false,
       });
     } catch (error) {
-      console.error('Gemini Error:', error);
-      updateNodeData(nodeId, {
-        messages: [...updatedMessages, { role: 'model', content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from provider.'}` }],
+      console.error('Model stream error:', error);
+      updateNodeDataForCanvas(canvasId, nodeId, {
+        messages: [
+          ...messagesBeforeModel,
+          {
+            role: 'model',
+            content: `Error: ${error instanceof Error ? error.message : errorFallback}`,
+          },
+        ],
         isProcessing: false,
       });
     }
-  }, [selectedModel, selectedProvider.protocol, selectedProviderConfig.apiKey, selectedProviderConfig.baseUrl, updateNodeData, nodes]);
+  }, [
+    buildModelMessage,
+    selectedModel,
+    selectedProvider.protocol,
+    selectedProviderConfig.apiKey,
+    selectedProviderConfig.baseUrl,
+    setCenter,
+    updateNodeDataForCanvas,
+  ]);
+
+  const handleSendMessage = useCallback(async (nodeId: string, text: string) => {
+    if (!currentCanvasId) return;
+
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== 'conversation') return;
+
+    const activeCanvasId = currentCanvasId;
+    const data = node.data as ConversationNodeData;
+    const userMessage: Message = { role: 'user', content: text };
+    const updatedMessages = [...data.messages, userMessage];
+
+    updateNodeDataForCanvas(activeCanvasId, nodeId, {
+      messages: updatedMessages,
+      isProcessing: true,
+    });
+
+    await streamResponseToNode({
+      canvasId: activeCanvasId,
+      nodeId,
+      requestMessages: updatedMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        attachments: message.attachments,
+      })),
+      messagesBeforeModel: updatedMessages,
+      errorFallback: 'Failed to get response from provider.',
+      systemInstruction: 'You are a helpful assistant. Keep responses concise but informative.',
+    });
+  }, [currentCanvasId, streamResponseToNode, updateNodeDataForCanvas, nodes]);
 
   // Inject handlers into nodes
   const nodesWithHandlers = useMemo(() => {
@@ -333,11 +372,8 @@ const Canvas = () => {
 
   // Auto-create pending branch when typing
   useEffect(() => {
-    if (globalInput.trim().length > 0 && !pendingBranch && nodes.length > 0) {
-      const targetNode =
-        nodes.find((node) => node.selected && (node.type === 'conversation' || node.type === 'start')) ||
-        [...nodes].reverse().find((node) => node.type === 'conversation') ||
-        rootStartNode;
+    if (globalInput.trim().length > 0 && !pendingBranch && conversationNodes.length > 0) {
+      const targetNode = getAnchorNode();
 
       if (targetNode) {
         if (targetNode.type === 'conversation') {
@@ -382,7 +418,7 @@ const Canvas = () => {
         }, 100);
       }
     }
-  }, [globalInput, pendingBranch, nodes, rootStartNode, setPendingBranch, setNodes, setEdges, handleSendMessage, setCenter]);
+  }, [conversationNodes.length, getAnchorNode, globalInput, pendingBranch, setPendingBranch, setNodes, setEdges, handleSendMessage, setCenter]);
 
   useEffect(() => {
     const nodesById = new Map(nodes.map((node) => [node.id, node]));
@@ -436,7 +472,8 @@ const Canvas = () => {
   }, [globalInput, pendingBranch, setNodes, setEdges, setPendingBranch]);
 
   const onGlobalSubmit = async () => {
-    if ((!globalInput.trim() && composerAttachments.length === 0) || isProcessing || !isProviderConfigured) return;
+    if (!currentCanvasId) return;
+    if ((!globalInput.trim() && composerAttachments.length === 0) || isCurrentCanvasProcessing || !isProviderConfigured) return;
 
     const hasUnsupportedAttachments = composerAttachments.some((attachment) =>
       attachment.kind === 'image' ? !supportsImageUpload : !supportsPdfUpload
@@ -448,8 +485,8 @@ const Canvas = () => {
     }
 
     const text = globalInput;
+    const activeCanvasId = currentCanvasId;
     setGlobalInput('');
-    setIsProcessing(true);
     const attachments = composerAttachments;
     setComposerAttachments([]);
     setComposerNotice(null);
@@ -471,16 +508,11 @@ const Canvas = () => {
       }
       setPendingBranch(null);
     } else if (nodes.length > 0) {
-      const lastNode =
-        nodes.find((node) => node.selected && (node.type === 'conversation' || node.type === 'start')) ||
-        [...nodes].reverse().find((node) => node.type === 'conversation') ||
-        rootStartNode;
+      const lastNode = getAnchorNode();
       
       if (lastNode && lastNode.type === 'conversation') {
         const data = lastNode.data as ConversationNodeData;
         if (data.isProcessing) {
-          // Revert processing state since we are blocking submission
-          setIsProcessing(false);
           setGlobalInput(text);
           setComposerAttachments(attachments);
           return;
@@ -512,7 +544,7 @@ const Canvas = () => {
     };
 
     if (isBranching) {
-      updateNodeData(targetNodeId, newNodeData);
+      updateNodeDataForCanvas(activeCanvasId, targetNodeId, newNodeData);
       setEdges(edges.map(e => {
         if (e.id === `edge_${targetNodeId}`) {
           const { style, ...rest } = e;
@@ -547,62 +579,23 @@ const Canvas = () => {
       }
     }
 
-    try {
-      let fullText = '';
-      let fullReasoningText = '';
-      const requestMessages: AIMessage[] = [
-        ...context,
-        { role: 'user', content: text, attachments: requestAttachments },
-      ];
-      
-      // Initialize the model message so it shows up immediately
-      updateNodeData(targetNodeId, {
-        messages: [userMessage, { role: 'model', content: '' }],
-        isProcessing: true,
-      });
+    const requestMessages: AIMessage[] = [
+      ...context,
+      { role: 'user' as const, content: text, attachments: requestAttachments },
+    ].map((message) => ({
+      role: message.role,
+      content: message.content,
+      attachments: message.attachments,
+    }));
 
-      setTimeout(() => {
-        const center = getNodeCenter(position, getConversationNodeSize());
-        setCenter(center.x, center.y, { zoom: 1, duration: 800 });
-      }, 100);
-
-      for await (const chunk of streamText({
-        protocol: selectedProvider.protocol,
-        model: selectedModel,
-        apiKey: selectedProviderConfig.apiKey.trim(),
-        baseUrl: selectedProviderConfig.baseUrl.trim(),
-        messages: requestMessages.map((message): AIMessage => ({
-          role: message.role,
-          content: message.content,
-          attachments: message.attachments,
-        })),
-      })) {
-        if (chunk.type === 'reasoning') {
-          fullReasoningText += chunk.text;
-        } else {
-          fullText += chunk.text;
-        }
-
-        updateNodeData(targetNodeId, {
-          messages: [userMessage, { role: 'model', content: fullText, reasoningContent: fullReasoningText || undefined }],
-          isProcessing: true,
-        });
-      }
-
-      updateNodeData(targetNodeId, {
-        messages: [userMessage, { role: 'model', content: fullText || 'No response', reasoningContent: fullReasoningText || undefined }],
-        isProcessing: false,
-      });
-
-    } catch (error) {
-      console.error('Gemini Error:', error);
-      updateNodeData(targetNodeId, {
-        messages: [userMessage, { role: 'model', content: `Error: ${error instanceof Error ? error.message : 'Failed to get response.'}` }],
-        isProcessing: false,
-      });
-    } finally {
-      setIsProcessing(false);
-    }
+    await streamResponseToNode({
+      canvasId: activeCanvasId,
+      nodeId: targetNodeId,
+      requestMessages,
+      messagesBeforeModel: [userMessage],
+      focusPosition: position,
+      errorFallback: 'Failed to get response.',
+    });
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -657,7 +650,7 @@ const Canvas = () => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
     if (e.key === 'Enter' && !e.shiftKey) {
-      if (isProcessing) {
+      if (isCurrentCanvasProcessing) {
         // Allow default behavior (newline) when processing
         return;
       }
@@ -753,17 +746,65 @@ const Canvas = () => {
 
   const handleDeleteSelected = () => {
     const selectedNodeIds = nodes.filter(n => n.selected).map(n => n.id);
-    selectedNodeIds.forEach(id => deleteNode(id));
+    if (selectedNodeIds.length === 0) return;
+    if (!currentCanvasId) return;
+
+    setUndoSnapshot({
+      canvasId: currentCanvasId,
+      nodes: nodes.filter((node) => selectedNodeIds.includes(node.id)),
+      edges: edges.filter((edge) => selectedNodeIds.includes(edge.source) || selectedNodeIds.includes(edge.target)),
+    });
+    deleteNodes(selectedNodeIds);
   };
 
-  const selectedCount = nodes.filter(n => n.selected).length;
-  const isSelectionMode = canvasInteractionMode === 'select';
+  const handleDeleteNode = useCallback((nodeId: string) => {
+    if (!currentCanvasId) return;
 
-  const getMiniMapNodeColor = useCallback((node: { type?: string }) => {
-    if (node.type === 'start') return '#0f172a';
-    if (node.type === 'folder') return '#94a3b8';
-    return '#0071e3';
-  }, []);
+    setUndoSnapshot({
+      canvasId: currentCanvasId,
+      nodes: nodes.filter((node) => node.id === nodeId),
+      edges: edges.filter((edge) => edge.source === nodeId || edge.target === nodeId),
+    });
+    deleteNode(nodeId);
+  }, [currentCanvasId, deleteNode, edges, nodes]);
+
+  useEffect(() => {
+    const handleUndoDelete = (event: KeyboardEvent) => {
+      const isUndoShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z';
+      if (!isUndoShortcut) return;
+
+      const target = event.target as HTMLElement | null;
+      const isEditableTarget =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        Boolean(target?.isContentEditable);
+
+      if (isEditableTarget) return;
+      if (!undoSnapshot) return;
+
+      event.preventDefault();
+      restoreDeletedSnapshot(undoSnapshot);
+      setUndoSnapshot(null);
+    };
+
+    window.addEventListener('keydown', handleUndoDelete);
+    return () => window.removeEventListener('keydown', handleUndoDelete);
+  }, [restoreDeletedSnapshot, undoSnapshot]);
+
+  useEffect(() => {
+    if (deletedNodesSnapshot) return;
+    if (undoSnapshot && undoSnapshot.nodes.length === 0) {
+      setUndoSnapshot(null);
+    }
+  }, [deletedNodesSnapshot, undoSnapshot]);
+
+  const selectedCount = nodes.filter(n => n.selected).length;
+  const isCurrentCanvasProcessing = conversationNodes.some((node) =>
+    Boolean((node.data as ConversationNodeData).isProcessing)
+  );
+  const shouldShowReadyScreen =
+    conversationNodes.length === 0 &&
+    !isCurrentCanvasProcessing;
 
   return (
     <div className="relative flex w-full h-screen bg-canvas-bg overflow-hidden font-sans">
@@ -776,72 +817,47 @@ const Canvas = () => {
 
       <main className="flex-1 relative flex flex-col min-w-0">
         <div className="flex-1 relative">
-          <ReactFlow
-            nodes={nodesWithHandlers}
+          <CanvasViewport
             edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeContextMenu={onNodeContextMenu}
-            onPaneContextMenu={onPaneContextMenu}
+            hidden={shouldShowReadyScreen}
+            interactionMode={canvasInteractionMode}
             nodeTypes={nodeTypes}
-            defaultEdgeOptions={{
-              animated: true,
-            }}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            selectionOnDrag={isSelectionMode}
-            panOnDrag={!isSelectionMode}
-            nodesDraggable={true}
-            selectionMode={SelectionMode.Partial}
-            className="bg-canvas-bg"
-          >
-            <Background color="#e2e8f0" gap={20} size={1} />
-            <Controls 
-              position="bottom-left" 
-              showFitView={true}
-              className="!flex !flex-row shadow-xl shadow-slate-200/20 rounded-xl overflow-hidden border border-slate-100 [&>button]:!w-6 [&>button]:!h-6 [&>button]:!border-b-0 [&>button]:!border-r [&>button:last-child]:!border-r-0 [&>button>svg]:!max-w-[10px] [&>button>svg]:!max-h-[10px] m-4"
-            />
-            <MiniMap
-              position="bottom-right"
-              pannable
-              zoomable
-              maskColor="rgba(255,255,255,0.78)"
-              nodeColor={getMiniMapNodeColor}
-              nodeStrokeWidth={3}
-              className="!mb-6 !mr-6 !h-[150px] !w-[220px] !overflow-hidden !rounded-[1.4rem] !border !border-white/90 !bg-white/78 !shadow-[0_18px_48px_rgba(15,23,42,0.10)] !backdrop-blur-2xl"
-            />
-          </ReactFlow>
-
-          <div className="pointer-events-none absolute bottom-[11.5rem] right-[1.55rem] z-20">
-            <div className="pointer-events-auto mb-4 flex items-center gap-1 rounded-[1.1rem] border border-white/90 bg-white/72 p-1.5 shadow-[0_16px_42px_rgba(15,23,42,0.10)] backdrop-blur-2xl">
-              <button
-                type="button"
-                onClick={() => setCanvasInteractionMode('drag')}
-                className={`inline-flex items-center gap-2 rounded-[0.9rem] px-3.5 py-2.5 text-[13px] font-medium transition ${
-                  !isSelectionMode
-                    ? 'bg-slate-900 text-white shadow-[0_10px_22px_rgba(15,23,42,0.18)]'
-                    : 'text-slate-600 hover:bg-black/[0.04]'
-                }`}
-              >
-                <Hand className="h-4 w-4" />
-                <span>拖拽</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setCanvasInteractionMode('select')}
-                className={`inline-flex items-center gap-2 rounded-[0.9rem] px-3.5 py-2.5 text-[13px] font-medium transition ${
-                  isSelectionMode
-                    ? 'bg-[#0071e3] text-white shadow-[0_10px_22px_rgba(0,113,227,0.22)]'
-                    : 'text-slate-600 hover:bg-black/[0.04]'
-                }`}
-              >
-                <ScanSearch className="h-4 w-4" />
-                <span>框选</span>
-              </button>
-            </div>
-          </div>
+            nodes={nodesWithHandlers}
+            onConnect={onConnect}
+            onEdgesChange={onEdgesChange}
+            onNodeContextMenu={onNodeContextMenu}
+            onNodesChange={onNodesChange}
+            onPaneContextMenu={onPaneContextMenu}
+            setInteractionMode={setCanvasInteractionMode}
+          />
         </div>
+
+        {undoSnapshot ? (
+          <div className="pointer-events-none fixed bottom-7 left-1/2 z-[120] -translate-x-1/2">
+            <motion.div
+              key={undoSnapshot.nodes.map((node) => node.id).join('_')}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              className="pointer-events-auto flex items-center gap-3 rounded-[1.1rem] border border-white/90 bg-white/90 px-3.5 py-3 shadow-[0_18px_48px_rgba(15,23,42,0.12)] backdrop-blur-2xl"
+            >
+              <div className="text-[12px] text-slate-500">
+                {undoSnapshot.nodes.length > 1 ? `${undoSnapshot.nodes.length} nodes deleted` : 'Node deleted'}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  restoreDeletedSnapshot(undoSnapshot);
+                  setUndoSnapshot(null);
+                }}
+                className="inline-flex items-center gap-2 rounded-[0.9rem] bg-slate-900 px-3 py-2 text-[12px] font-medium text-white transition hover:bg-[#0071e3]"
+              >
+                <Undo2 className="h-4 w-4" />
+                <span>撤回</span>
+              </button>
+            </motion.div>
+          </div>
+        ) : null}
 
         {contextMenu && (
           <ContextMenu
@@ -850,7 +866,7 @@ const Canvas = () => {
             onClose={() => setContextMenu(null)}
             onMerge={selectedCount > 1 ? handleArchiveSelected : undefined}
             onExtract={contextMenu.isFolder && contextMenu.nodeId ? () => unarchiveNode(contextMenu.nodeId!) : undefined}
-            onDelete={selectedCount > 0 ? handleDeleteSelected : (contextMenu.nodeId ? () => deleteNode(contextMenu.nodeId!) : undefined)}
+            onDelete={selectedCount > 0 ? handleDeleteSelected : (contextMenu.nodeId ? () => handleDeleteNode(contextMenu.nodeId!) : undefined)}
             onInsert={handleInsertNode}
             onCenter={() => fitView({ duration: 800 })}
             onCopyContent={handleCopyContent}
@@ -861,344 +877,57 @@ const Canvas = () => {
           />
         )}
 
-        <ModelSettingsPanel
-          isOpen={isSettingsOpen}
-          selectedProviderId={selectedProviderId}
+        <Suspense fallback={null}>
+          {isSettingsOpen ? (
+            <ModelSettingsPanel
+              isOpen={isSettingsOpen}
+              selectedProviderId={selectedProviderId}
+              selectedModel={selectedModel}
+              providerConfigs={providerConfigs}
+              onClose={() => setIsSettingsOpen(false)}
+              onSelectProvider={setSelectedProvider}
+              onSelectModel={setSelectedModel}
+              onUpdateProviderConfig={updateProviderConfig}
+            />
+          ) : null}
+        </Suspense>
+
+        <ChatComposer
+          attachments={composerAttachments}
+          composerNotice={composerNotice}
+          isCurrentCanvasProcessing={isCurrentCanvasProcessing}
+          isProviderConfigured={isProviderConfigured}
+          modelMenuItems={modelMenuItems}
+          onChange={setGlobalInput}
+          onFileChange={handleFileChange}
+          onKeyDown={handleKeyDown}
+          onModelSelect={(providerId, modelId) => {
+            setSelectedProvider(providerId);
+            setSelectedModel(modelId);
+          }}
+          onRemoveAttachment={removeAttachment}
+          onSubmit={onGlobalSubmit}
+          onUnsupportedUpload={() => {
+            setComposerNotice('当前模型不支持上传图片/PDF。请切换到支持视觉的模型，例如 Qwen 3.5 Plus 或 Gemini 2.5 Flash。');
+          }}
+          pendingBranch={pendingBranch}
+          readyMode={shouldShowReadyScreen}
           selectedModel={selectedModel}
-          providerConfigs={providerConfigs}
-          onClose={() => setIsSettingsOpen(false)}
-          onSelectProvider={setSelectedProvider}
-          onSelectModel={setSelectedModel}
-          onUpdateProviderConfig={updateProviderConfig}
+          selectedModelOption={selectedModelOption}
+          selectedProvider={selectedProvider}
+          selectedProviderId={selectedProviderId}
+          supportsAnyUpload={supportsAnyUpload}
+          value={globalInput}
         />
 
-        <AnimatePresence>
-          {previewAttachment && (
-            <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6">
-              <motion.button
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setPreviewAttachment(null)}
-                className="absolute inset-0 bg-slate-950/26 backdrop-blur-md"
-              />
-              <motion.div
-                initial={{ opacity: 0, y: 12, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 12, scale: 0.98 }}
-                className="relative w-full max-w-5xl rounded-[1.6rem] border border-white/90 bg-white/82 p-4 shadow-[0_24px_80px_rgba(36,39,46,0.16)] backdrop-blur-2xl"
-              >
-                <div className="mb-4 flex items-center justify-between gap-4 rounded-[1.1rem] bg-black/[0.03] px-4 py-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-slate-800">{previewAttachment.name}</div>
-                    <div className="mt-1 text-xs text-slate-400">{previewAttachment.mimeType}</div>
-                  </div>
-                  <button
-                    onClick={() => setPreviewAttachment(null)}
-                    className="rounded-full p-2 text-slate-400 hover:bg-black/[0.05] hover:text-slate-600"
-                    type="button"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="overflow-hidden rounded-[1.2rem] bg-[#f4f5f7]">
-                  {previewAttachment.kind === 'image' && (previewAttachment.dataUrl || previewAttachment.previewUrl) ? (
-                    <img
-                      src={previewAttachment.dataUrl || previewAttachment.previewUrl}
-                      alt={previewAttachment.name}
-                      className="max-h-[76vh] w-full object-contain"
-                    />
-                  ) : previewAttachment.mimeType === 'application/pdf' && (previewAttachment.dataUrl || previewAttachment.previewUrl) ? (
-                    <iframe
-                      src={previewAttachment.dataUrl || previewAttachment.previewUrl}
-                      title={previewAttachment.name}
-                      className="h-[76vh] w-full bg-white"
-                    />
-                  ) : (
-                    <div className="flex h-[40vh] items-center justify-center text-sm text-slate-500">
-                      当前文件暂不支持预览
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-
-        {/* Empty State */}
-        <AnimatePresence>
-          {conversationNodes.length === 0 && !pendingBranch && !rootStartNode && (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 flex items-center justify-center pointer-events-none"
-            >
-              <div className="flex flex-col items-center gap-8 max-w-md text-center px-8">
-                <motion.div 
-                  initial={{ scale: 0.8, rotate: -10 }}
-                  animate={{ scale: 1, rotate: 0 }}
-                  className="w-24 h-24 bg-white rounded-[2.5rem] shadow-2xl flex items-center justify-center border border-slate-50"
-                >
-                  <Sparkles className="w-10 h-10 text-emerald-500" />
-                </motion.div>
-                <div className="space-y-3">
-                  <h3 className="text-2xl font-bold text-slate-800 tracking-tight">Design your conversation</h3>
-                  <p className="text-sm text-slate-400 leading-relaxed font-medium">
-                    Start a new flow by typing below, or use the branching tools to explore different paths.
-                  </p>
-                </div>
-                <button 
-                  onClick={() => {
-                    const id = 'root';
-                    const pendingNodeId = `pending_${id}_${Date.now()}`;
-                    const rootPosition = { x: 0, y: 0 };
-                    const pendingPosition = getBranchedPosition(
-                      { position: rootPosition },
-                      'bottom',
-                      getPendingNodeSize()
-                    );
-                    setNodes([
-                      {
-                        id,
-                        type: 'conversation',
-                        position: rootPosition,
-                        data: { label: '', messages: [], onSendMessage: handleSendMessage, isPending: false },
-                        draggable: true,
-                        selected: true,
-                      },
-                      {
-                        id: pendingNodeId,
-                        type: 'conversation',
-                        position: pendingPosition,
-                        data: { label: '', messages: [], onSendMessage: handleSendMessage, isPending: true }
-                      }
-                    ]);
-                    setEdges([{
-                      id: `edge_${pendingNodeId}`,
-                      source: id,
-                      target: pendingNodeId,
-                      sourceHandle: 'bottom',
-                      targetHandle: 'target-top',
-                      animated: true,
-                      style: { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' },
-                    }]);
-                    setPendingBranch({ sourceNodeId: id, direction: 'bottom', pendingNodeId });
-                  }}
-                  className="pointer-events-auto px-11 py-5 bg-slate-900 text-white rounded-[1.5rem] font-semibold text-[11px] uppercase tracking-[0.24em] hover:bg-[#0071e3] transition-all shadow-[0_16px_40px_rgba(36,39,46,0.16)] hover:scale-[1.01] active:scale-95"
-                >
-                  Initialize Flow
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Floating Bottom Input */}
-        <div className="absolute bottom-12 left-1/2 -translate-x-1/2 w-full max-w-2xl px-8 z-50">
-          <div ref={composerMenuRef} className="relative">
-            <AnimatePresence>
-              {isModelMenuOpen && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 10, scale: 0.98 }}
-                  className="absolute left-0 bottom-[calc(100%+16px)] w-[380px] rounded-[1.35rem] border border-white/90 bg-white/74 p-3 shadow-[0_18px_48px_rgba(36,39,46,0.10)] backdrop-blur-2xl"
-                >
-                  <div className="px-3 pb-3 text-[13px] font-medium text-slate-400">选择模型</div>
-                  <div className="space-y-1">
-                    {modelMenuItems.map(({ provider, model, isConfigured }) => (
-                      <button
-                        key={`${provider.id}_${model.id}`}
-                        onClick={() => {
-                          if (!isConfigured) return;
-                          setSelectedProvider(provider.id);
-                          setSelectedModel(model.id);
-                          setIsModelMenuOpen(false);
-                        }}
-                        disabled={!isConfigured}
-                        className={`flex w-full items-center justify-between rounded-[1rem] px-3 py-3 text-left transition ${
-                          isConfigured
-                            ? 'text-slate-800 hover:bg-black/[0.035]'
-                            : 'cursor-not-allowed text-slate-400'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <ProviderMark providerId={provider.id} size="md" muted={!isConfigured} />
-                          <div className="min-w-0">
-                            <div className={`text-[15px] font-medium ${isConfigured ? 'text-slate-900' : 'text-slate-400'}`}>
-                              {model.label}
-                            </div>
-                            <div className="mt-1 text-xs text-slate-400">
-                              {provider.label} · {model.description}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {!isConfigured && <Lock className="w-4 h-4 text-slate-300" />}
-                          {selectedProviderId === provider.id && selectedModel === model.id && (
-                            <Check className="w-5 h-5 text-slate-900" />
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  {!modelMenuItems.some((item) => item.isConfigured) && (
-                    <div className="px-3 pt-4 text-xs text-slate-400">
-                      先去侧边栏头像菜单里的 Settings 配置 API Key。
-                    </div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <motion.div 
-              layout
-              className="bg-white/48 backdrop-blur-[36px] border border-white/92 shadow-[0_12px_34px_rgba(36,39,46,0.07)] rounded-[2rem] px-8 pt-7 pb-5 transition-all hover:bg-white/54"
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,image/png,image/jpeg,image/jpg,image/webp"
-                onChange={handleFileChange}
-                className="hidden"
-              />
-              {composerAttachments.length > 0 && (
-                <div className="mb-5 flex items-start gap-3 overflow-x-auto pb-1">
-                  {composerAttachments.map((attachment) => (
-                    <div
-                      key={attachment.id}
-                      className="group relative h-[92px] w-[92px] flex-shrink-0 overflow-hidden rounded-[1rem] border border-black/[0.06] bg-white shadow-[0_8px_22px_rgba(36,39,46,0.06)]"
-                    >
-                      <button
-                        onClick={() => setPreviewAttachment(attachment)}
-                        className="absolute inset-0"
-                        type="button"
-                        aria-label={`预览 ${attachment.name}`}
-                      />
-                      {attachment.kind === 'image' && attachment.dataUrl ? (
-                        <img
-                          src={attachment.dataUrl}
-                          alt={attachment.name}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[linear-gradient(180deg,#ffffff_0%,#f4f5f8_100%)] px-3 text-center">
-                          <FileText className="w-6 h-6 text-[#0071e3]" />
-                          <span className="line-clamp-2 text-[10px] font-medium leading-tight text-slate-500">
-                            {attachment.name}
-                          </span>
-                        </div>
-                      )}
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/45 to-transparent px-2 py-2">
-                        <div className="truncate text-[10px] font-medium text-white">
-                          {attachment.name}
-                        </div>
-                      </div>
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          removeAttachment(attachment.id);
-                        }}
-                        className="absolute right-2 top-2 rounded-full bg-black/42 p-1 text-white opacity-0 transition group-hover:opacity-100 hover:bg-black/58"
-                        type="button"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
-
-                  <button
-                    onClick={() => {
-                      if (!supportsAnyUpload) {
-                        setComposerNotice('当前模型不支持上传图片/PDF。请切换到支持视觉的模型，例如 Qwen 3.5 Plus 或 Gemini 2.5 Flash。');
-                        setIsModelMenuOpen(true);
-                        return;
-                      }
-                      fileInputRef.current?.click();
-                    }}
-                    className="flex h-[92px] w-[92px] flex-shrink-0 items-center justify-center rounded-[1rem] bg-black/[0.04] text-slate-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition hover:bg-black/[0.06] hover:text-slate-700"
-                    type="button"
-                  >
-                    <Plus className="w-7 h-7" />
-                  </button>
-                </div>
-              )}
-              <textarea
-                id="global-input"
-                value={globalInput}
-                onChange={(e) => setGlobalInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  !isProviderConfigured
-                    ? '请先在 Settings 中配置可用模型...'
-                    : pendingBranch
-                      ? 'Ask the selected model to continue this branch...'
-                      : 'Start a new conversation flow...'
-                }
-                className="w-full bg-transparent border-none outline-none focus:outline-none focus:ring-0 text-slate-800 placeholder-slate-300 resize-none min-h-[84px] max-h-[220px] text-[20px] leading-relaxed tracking-[-0.024em]"
-                rows={1}
-              />
-              {composerNotice && (
-                <div className="mt-3 rounded-[1rem] bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                  {composerNotice}
-                </div>
-              )}
-              <div className="mt-4 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => {
-                      if (!supportsAnyUpload) {
-                        setComposerNotice('当前模型不支持上传图片/PDF。请切换到支持视觉的模型，例如 Qwen 3.5 Plus 或 Gemini 2.5 Flash。');
-                        setIsModelMenuOpen(true);
-                        return;
-                      }
-                      fileInputRef.current?.click();
-                    }}
-                    className="inline-flex items-center gap-2 rounded-full bg-black/[0.032] px-5 py-3 text-[15px] font-medium text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.98)] transition hover:bg-black/[0.05]"
-                    type="button"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                    <span>上传文件</span>
-                  </button>
-                  <button
-                    onClick={() => setIsModelMenuOpen((value) => !value)}
-                    className="inline-flex items-center gap-3 rounded-full bg-black/[0.032] px-4 py-3 text-[15px] font-medium text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.98)] transition hover:bg-black/[0.05]"
-                  >
-                    <ProviderMark providerId={selectedProvider.id} size="sm" />
-                    <div className="flex flex-col items-start leading-none">
-                      <span className="text-[14px] font-semibold text-slate-800">{selectedModelOption?.label ?? '选择模型'}</span>
-                      <span className="mt-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">{selectedProvider.label}</span>
-                    </div>
-                    <ChevronDown className={`w-4 h-4 transition-transform ${isModelMenuOpen ? 'rotate-180' : ''}`} />
-                  </button>
-                </div>
-
-                <div className="flex items-center">
-                  <button
-                    onClick={onGlobalSubmit}
-                    disabled={(!globalInput.trim() && composerAttachments.length === 0) || isProcessing || !isProviderConfigured}
-                    className="w-14 h-14 bg-slate-900 text-white rounded-full shadow-[0_10px_22px_rgba(36,39,46,0.18)] hover:bg-[#0071e3] disabled:opacity-25 disabled:scale-95 transition-all active:scale-90 flex items-center justify-center flex-shrink-0"
-                  >
-                    {isProcessing ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <Send className="w-6 h-6" />
-                    )}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-          {pendingBranch && (
-            <motion.div 
+        {pendingBranch && (
+          <div className="pointer-events-none absolute left-1/2 bottom-4 z-50 w-full max-w-2xl -translate-x-1/2 px-8">
+            <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="mt-4 flex justify-center"
+              className="pointer-events-auto flex justify-center"
             >
-              <button 
+              <button
                 onClick={() => {
                   setPendingBranch(null);
                   setNodes((nds) => nds.filter(n => !(n.data as ConversationNodeData).isPending));
@@ -1209,8 +938,8 @@ const Canvas = () => {
                 Cancel Branching
               </button>
             </motion.div>
-          )}
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -6,7 +6,7 @@ import {
   type ProviderCatalogId,
   type ProviderCatalogEntry,
 } from '../lib/modelCatalog';
-import type { ProviderConfig } from '../store';
+import type { ProviderConfig } from '../types/canvas';
 import ProviderMark from './ProviderMark';
 
 interface ModelSettingsPanelProps {
